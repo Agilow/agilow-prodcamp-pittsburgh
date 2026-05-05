@@ -505,7 +505,7 @@ function Shell({ active, setActive, onOpenCmd, children }) {
         <div className="sidebar-footer">
           <Avatar personKey="shiv" />
           <div>
-            <div className="user-name">Shiv V.</div>
+            <div className="user-name">Shiv Panjwani</div>
             <div className="user-meta">Founder workspace</div>
           </div>
         </div>
