@@ -56,10 +56,22 @@ button {
 .sidebar {
   display: flex;
   flex-direction: column;
-  background: var(--navy) url('/image.png') center center / cover no-repeat;
+  background: var(--navy);
   color: rgba(255, 255, 255, 0.72);
-  padding: 10px 7px;
+  padding: 0;
   min-width: 0;
+  position: relative;
+  overflow: hidden;
+}
+
+.sidebar-content {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  padding: 10px 7px;
+  min-height: 0;
 }
 
 .brand {
@@ -1283,6 +1295,53 @@ h2 {
   background: var(--coral);
 }
 
+.health-team-panel {
+  grid-column: 1 / -1;
+}
+
+.team-health-list {
+  display: grid;
+}
+
+.team-health-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.team-health-row:last-child {
+  border-bottom: 0;
+}
+
+.team-health-main {
+  display: grid;
+  gap: 3px;
+}
+
+.team-health-main strong {
+  font-size: 12.5px;
+}
+
+.team-health-main span {
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.team-health-row em {
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  color: #5d5a52;
+  background: #faf8f4;
+  font-style: normal;
+  font-size: 11px;
+  font-weight: 700;
+}
+
 /* 4-column retrospective grid */
 .retro-grid {
   display: grid;
@@ -1603,4 +1662,49 @@ h2 {
   text-align: center;
   color: var(--muted);
   font-size: 13px;
+}
+
+/* ── SPLASH SCREEN ── */
+.splash {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--navy);
+  overflow: hidden;
+}
+
+.animated-bg-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.splash-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 24px;
+  position: relative;
+  z-index: 1;
+}
+
+.splash-logo {
+  width: 420px;
+  height: auto;
+}
+
+.splash-loading {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  margin: 0;
+  min-width: 160px;
+  text-align: center;
 }

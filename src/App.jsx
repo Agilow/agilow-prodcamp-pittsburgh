@@ -3,7 +3,6 @@ import { AnimatePresence, motion } from "framer-motion";
 import {
   ClipboardList,
   Command,
-  FileText,
   Gauge,
   GitPullRequest,
   LayoutDashboard,
@@ -381,13 +380,86 @@ function StatusDot({ state }) {
   return <span className={cx("status-dot", state)} />;
 }
 
+// Shared clock so all canvas instances draw the same frame
+let sharedT = 0;
+const clockListeners = new Set();
+let clockStarted = false;
+function startSharedClock() {
+  if (clockStarted) return;
+  clockStarted = true;
+  function tick() {
+    sharedT += 0.012;
+    clockListeners.forEach((fn) => fn(sharedT));
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+}
+
+function AnimatedBackground() {
+  const canvasRef = useRef(null);
+  useEffect(() => {
+    startSharedClock();
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
+
+    function resize() {
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = canvas.offsetWidth * dpr;
+      canvas.height = canvas.offsetHeight * dpr;
+      ctx.scale(dpr, dpr);
+    }
+
+    const ro = new ResizeObserver(resize);
+    ro.observe(canvas);
+    resize();
+
+    function drawFrame(t) {
+      const w = canvas.offsetWidth;
+      const h = canvas.offsetHeight;
+      const vw = 1400; // fixed virtual width — sidebar shows left crop, splash shows full
+      ctx.clearRect(0, 0, w, h);
+
+      function drawSet(count, direction, colorFn) {
+        for (let i = 0; i < count; i++) {
+          const frac = i / count;
+          ctx.strokeStyle = colorFn(frac);
+          ctx.lineWidth = 0.75;
+          ctx.beginPath();
+          const baseY = frac * h;
+          const amp = (65 * Math.sin(frac * Math.PI) + 20) * (h / 700);
+          for (let x = 0; x <= w; x += 2) {
+            const xp = x / vw; // use virtual width so waves aren't squeezed
+            const y = baseY
+              + amp * Math.sin(xp * Math.PI * 4 + direction * t * 0.45 + i * 0.28)
+              + amp * 0.45 * Math.sin(xp * Math.PI * 7 + direction * t * 0.28 + i * 0.14);
+            if (x === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+          }
+          ctx.stroke();
+        }
+      }
+
+      drawSet(38, 1, (frac) => `rgba(10,${Math.round(190 + frac * 35)},225,${0.10 + frac * 0.18})`);
+      drawSet(28, -1, (frac) => `rgba(${Math.round(80 + frac * 60)},60,220,${0.08 + frac * 0.14})`);
+    }
+
+    clockListeners.add(drawFrame);
+    drawFrame(sharedT);
+    return () => { clockListeners.delete(drawFrame); ro.disconnect(); };
+  }, []);
+
+  return <canvas ref={canvasRef} className="animated-bg-canvas" />;
+}
+
 function Shell({ active, setActive, onOpenCmd, children }) {
   const ActiveIcon = nav.find((item) => item.id === active)?.icon ?? LayoutDashboard;
   return (
     <div className="app-shell">
       <aside className="sidebar">
+        <AnimatedBackground />
+        <div className="sidebar-content">
         <div className="brand">
-          <img src="/agi2.png" alt="Agilow" className="brand-logo" />
+          <img src="/agi2-nobg.png" alt="Agilow" className="brand-logo" />
         </div>
 
         <div className="quick-search" onClick={onOpenCmd} style={{ cursor: "pointer" }}>
@@ -436,6 +508,7 @@ function Shell({ active, setActive, onOpenCmd, children }) {
             <div className="user-name">Shiv V.</div>
             <div className="user-meta">Founder workspace</div>
           </div>
+        </div>
         </div>
       </aside>
 
@@ -754,6 +827,13 @@ function HealthPage() {
     ["Cameron progress", 39],
     ["Shiv progress", 41],
   ];
+  const teamHealth = [
+    ["shiv", "Shiv", "Focused", "High ownership on Journey + fundraising, but stretched across priorities."],
+    ["antonio", "Antonio", "Energized", "Strong onboarding momentum with client-facing execution this week."],
+    ["shaurya", "Shaurya", "Heads-down", "Deep in Sprint Health delivery and infrastructure cleanup."],
+    ["cameron", "Cameron", "Constrained", "Strong output, but graduation travel limits availability."],
+    ["precious", "Precious", "Steady", "Consistent outreach cadence; call-volume target still needs push."],
+  ];
   return (
     <PageFrame pageKey="health">
       <div className="page-header">
@@ -762,7 +842,6 @@ function HealthPage() {
           <h1>Sprint Health — May 4</h1>
           <p className="lede">Day 3 of 8. Team is at 23% completion, 15 points behind expected pace.</p>
         </div>
-        <button className="ghost-button"><FileText size={14} /> Download PDF</button>
       </div>
       <div className="health-layout">
         <section className="grade-card">
@@ -780,6 +859,21 @@ function HealthPage() {
                   <motion.i initial={{ width: 0 }} animate={{ width: `${value}%` }} transition={{ delay: index * 0.08, duration: 0.7, ease: [0.22, 1, 0.36, 1] }} />
                 </div>
                 <strong>{value}%</strong>
+              </div>
+            ))}
+          </div>
+        </section>
+        <section className="panel health-team-panel">
+          <div className="panel-title"><h2>Team Health</h2></div>
+          <div className="team-health-list">
+            {teamHealth.map(([personKey, name, mood, note]) => (
+              <div className="team-health-row" key={name}>
+                <Avatar personKey={personKey} size="sm" />
+                <div className="team-health-main">
+                  <strong>{name}</strong>
+                  <span>{note}</span>
+                </div>
+                <em>{mood}</em>
               </div>
             ))}
           </div>
@@ -930,7 +1024,53 @@ function CommandPalette({ open, onClose, onNavigate }) {
   );
 }
 
+function SplashLoadingDots() {
+  const [dots, setDots] = useState("");
+  useEffect(() => {
+    const id = setInterval(() => setDots((d) => (d.length >= 3 ? "" : d + ".")), 500);
+    return () => clearInterval(id);
+  }, []);
+  return <span>{dots}</span>;
+}
+
+function SplashScreen({ onDone }) {
+  const [phase, setPhase] = useState(0); // 0=hold, 1=logo-exit, 2=collapse
+
+  useEffect(() => {
+    const t = setTimeout(() => setPhase(1), 4200);
+    return () => clearTimeout(t);
+  }, []);
+
+  return (
+    <motion.div
+      className="splash"
+      animate={phase === 2 ? { clipPath: "inset(0 calc(100% - 218px) 0 0)" } : { clipPath: "inset(0 0% 0 0)" }}
+      transition={{ duration: 0.85, ease: [0.22, 1, 0.36, 1] }}
+      onAnimationComplete={() => { if (phase === 2) onDone(); }}
+    >
+      <AnimatedBackground />
+      <motion.div
+        className="splash-inner"
+        animate={phase >= 1 ? { opacity: 0, y: -110 } : { opacity: 1, y: 0 }}
+        transition={{ duration: 0.75, ease: [0.22, 1, 0.36, 1] }}
+        onAnimationComplete={() => { if (phase === 1) setPhase(2); }}
+      >
+        <img src="/agi2-nobg.png" className="splash-logo" />
+        <motion.p
+          className="splash-loading"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ delay: 0.5, duration: 0.6 }}
+        >
+          Loading Agilow<SplashLoadingDots />
+        </motion.p>
+      </motion.div>
+    </motion.div>
+  );
+}
+
 export default function App() {
+  const [splash, setSplash] = useState(true);
   const [active, setActive] = useState("overview");
   const [cmdOpen, setCmdOpen] = useState(false);
 
@@ -962,6 +1102,7 @@ export default function App() {
       <Shell active={active} setActive={setActive} onOpenCmd={() => setCmdOpen(true)}>
         <AnimatePresence mode="wait">{page}</AnimatePresence>
       </Shell>
+      {splash && <SplashScreen onDone={() => setSplash(false)} />}
       <AnimatePresence>
         {cmdOpen && (
           <CommandPalette
