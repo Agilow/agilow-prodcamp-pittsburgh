@@ -515,6 +515,22 @@ function Shell({ active, setActive, onOpenCmd, children }) {
       <main className="main">
         {children}
       </main>
+
+      <nav className="mobile-nav">
+        {nav.map((item) => {
+          const Icon = item.icon;
+          return (
+            <button
+              key={item.id}
+              className={cx("mobile-nav-item", active === item.id && "active")}
+              onClick={() => setActive(item.id)}
+            >
+              <Icon size={20} />
+              <span>{item.label}</span>
+            </button>
+          );
+        })}
+      </nav>
     </div>
   );
 }

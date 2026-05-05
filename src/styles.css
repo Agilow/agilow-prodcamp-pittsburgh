@@ -1504,30 +1504,85 @@ h2 {
   }
 }
 
+/* ── MOBILE NAV (hidden on desktop) ── */
+.mobile-nav {
+  display: none;
+}
+
 @media (max-width: 760px) {
   .app-shell {
     grid-template-columns: 1fr;
+    grid-template-rows: 1fr auto;
+    height: 100dvh;
   }
 
   .sidebar {
     display: none;
   }
 
-  .page {
-    padding: 24px 18px;
+  .main {
+    padding-bottom: 0;
   }
 
-  .page-header,
-  .topbar {
-    align-items: flex-start;
+  /* Bottom nav bar */
+  .mobile-nav {
+    display: flex;
+    align-items: stretch;
+    background: var(--navy);
+    border-top: 1px solid rgba(255,255,255,0.08);
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 100;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  .mobile-nav-item {
+    flex: 1;
+    display: flex;
     flex-direction: column;
-    height: auto;
-    padding: 16px 18px;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    padding: 10px 4px;
+    background: transparent;
+    border: none;
+    color: rgba(255,255,255,0.45);
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    cursor: pointer;
+    transition: color 150ms;
   }
 
-  .decision-strip,
-  .retro-grid {
-    grid-template-columns: 1fr;
+  .mobile-nav-item.active {
+    color: white;
+  }
+
+  .mobile-nav-item.active svg {
+    color: var(--coral);
+  }
+
+  .page {
+    padding: 20px 16px 100px;
+  }
+
+  h1 {
+    font-size: 28px;
+    letter-spacing: -0.03em;
+  }
+
+  .page-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+
+  .decision-strip {
+    grid-template-columns: 1fr 1fr;
   }
 
   .signal-cell {
@@ -1535,19 +1590,52 @@ h2 {
     border-bottom: 1px solid var(--line);
   }
 
-  .signal-cell:last-child {
+  .signal-cell:nth-child(odd) {
+    border-right: 1px solid var(--line);
+  }
+
+  .signal-cell:last-child,
+  .signal-cell:nth-last-child(2):nth-child(odd) {
     border-bottom: 0;
+  }
+
+  .retro-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .overview-grid,
+  .standup-layout,
+  .planning-layout,
+  .health-layout {
+    grid-template-columns: 1fr;
   }
 
   .issue-row,
   .work-panel .issue-row {
-    grid-template-columns: 12px 64px minmax(0, 1fr) auto;
+    grid-template-columns: 12px 54px minmax(0, 1fr) auto;
   }
 
   .issue-risk,
   .tag,
   .points {
     display: none;
+  }
+
+  .cmd-modal {
+    width: calc(100vw - 24px);
+  }
+
+  .cmd-backdrop {
+    padding-top: 60px;
+    align-items: flex-start;
+  }
+
+  .splash-logo {
+    width: 240px;
+  }
+
+  .lede {
+    font-size: 12px;
   }
 }
 
