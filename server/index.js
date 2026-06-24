@@ -58,7 +58,11 @@ let _openai;
 function getOpenAI() {
   if (!_openai) {
     if (!process.env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY is not set");
-    _openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    _openai = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
+      timeout: 180000, // long web-search research calls
+      maxRetries: 4,
+    });
   }
   return _openai;
 }
@@ -337,43 +341,66 @@ function buildEditExamplesBlock(examples) {
 /* ============================================================
    OpenAI: research (web search) -> dossier -> draft message
    ============================================================ */
+/* Stream a Responses API call and accumulate the text. Streaming keeps the
+   connection active during long web-search calls so intermediaries (e.g.
+   Render) don't drop the idle socket with "Premature close". Retried on
+   transient network errors. */
+async function streamResponseText(params, label) {
+  return withRetry(async () => {
+    const stream = await getOpenAI().responses.create({ ...params, stream: true });
+    let text = "";
+    for await (const event of stream) {
+      if (event.type === "response.output_text.delta") {
+        text += event.delta || "";
+      } else if (event.type === "response.error" || event.type === "error") {
+        throw new Error(event.error?.message || "OpenAI stream error");
+      }
+    }
+    return text.trim();
+  }, label);
+}
+
 async function researchDossier(inputs) {
   const system = fillResearchPrompt(inputs);
-  const resp = await getOpenAI().responses.create({
-    model: OPENAI_MODEL,
-    temperature: 0.2,
-    tools: [{ type: "web_search" }],
-    input: [
-      { role: "system", content: system },
-      {
-        role: "user",
-        content:
-          "Research this lead now using web search and return the dossier in exactly the required output structure.",
-      },
-    ],
-  });
-  return (resp.output_text || "").trim();
+  return streamResponseText(
+    {
+      model: OPENAI_MODEL,
+      temperature: 0.2,
+      tools: [{ type: "web_search" }],
+      input: [
+        { role: "system", content: system },
+        {
+          role: "user",
+          content:
+            "Research this lead now using web search and return the dossier in exactly the required output structure.",
+        },
+      ],
+    },
+    "openai.research"
+  );
 }
 
 /* Returns the plain-text outreach message (the draft only). */
 async function draftMessage({ dossier, warmTie, ownerName, editExamples }) {
   const system = fillDraftingPrompt({ ownerName, editExamples });
-  const resp = await getOpenAI().responses.create({
-    model: OPENAI_MODEL,
-    temperature: 0.3,
-    input: [
-      { role: "system", content: system },
-      {
-        role: "user",
-        content:
-          `RELATIONSHIP NOTES (how ${ownerName || "Shiv"} / the team knows them, and prior contact):\n` +
-          `${warmTie || "No prior relationship on record."}\n\n` +
-          `RESEARCH DOSSIER:\n${dossier}\n\n` +
-          `Write the message now. Return ONLY the message text.`,
-      },
-    ],
-  });
-  return (resp.output_text || "").trim();
+  return streamResponseText(
+    {
+      model: OPENAI_MODEL,
+      temperature: 0.3,
+      input: [
+        { role: "system", content: system },
+        {
+          role: "user",
+          content:
+            `RELATIONSHIP NOTES (how ${ownerName || "Shiv"} / the team knows them, and prior contact):\n` +
+            `${warmTie || "No prior relationship on record."}\n\n` +
+            `RESEARCH DOSSIER:\n${dossier}\n\n` +
+            `Write the message now. Return ONLY the message text.`,
+        },
+      ],
+    },
+    "openai.draft"
+  );
 }
 
 /* ============================================================
