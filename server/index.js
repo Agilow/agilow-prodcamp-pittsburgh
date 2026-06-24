@@ -504,7 +504,7 @@ async function extractVerdict(dossier) {
           {
             role: "system",
             content:
-              "Extract structured fields from this Agilow ICP research dossier. Use ONLY what the dossier states — do not add, infer, or change any fact. Copy the ICP FIT verdict and the A-E checks exactly as written.",
+              "Extract structured fields from this Agilow ICP research dossier. Use ONLY what the dossier states — do not add, infer, or change any fact. Copy the ICP FIT verdict, CONTACT TYPE, SUGGESTED INTENT, and the A-E checks exactly as written.",
           },
           { role: "user", content: `DOSSIER:\n${dossier}\n\nReturn the structured JSON.` },
         ],
@@ -521,6 +521,18 @@ async function extractVerdict(dossier) {
                   type: "string",
                   enum: ["Strong", "Moderate", "Moderate (unverified)", "Weak"],
                 },
+                contactType: {
+                  type: "string",
+                  enum: [
+                    "ICP founder/exec",
+                    "Connector",
+                    "Engineer/IC",
+                    "Adjacent",
+                    "Not relevant",
+                    "Unknown",
+                  ],
+                },
+                suggestedIntent: { type: "string" },
                 reasoning: { type: "string" },
                 checks: {
                   type: "array",
@@ -549,7 +561,7 @@ async function extractVerdict(dossier) {
                   required: ["company", "funding", "headcount", "stage", "hiring", "recentActivity"],
                 },
               },
-              required: ["verdict", "reasoning", "checks", "keyFacts"],
+              required: ["verdict", "contactType", "suggestedIntent", "reasoning", "checks", "keyFacts"],
             },
           },
         },
@@ -576,6 +588,8 @@ async function qualifyOne(lead = {}) {
     company: lead.company || "",
     linkedinUrl: lead.linkedinUrl || "",
     verdict: structured.verdict,
+    contactType: structured.contactType || "Unknown",
+    suggestedIntent: structured.suggestedIntent || "",
     checks: structured.checks || [],
     reasoning: structured.reasoning || "",
     keyFacts: structured.keyFacts || {},

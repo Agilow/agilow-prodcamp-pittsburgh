@@ -1056,6 +1056,24 @@ input[type="checkbox"] {
   line-height: 1.45;
 }
 
+/* ---- Contact type + suggested intent (Drafts + Qualify) ---- */
+.intent-strip {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.intent-strip .intent-line {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.qualify-intent {
+  margin-top: 6px;
+  margin-bottom: 0;
+}
+
 /* ---- Edit-reason confirmation (Drafts) ---- */
 .reason-panel {
   display: grid;

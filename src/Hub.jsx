@@ -550,6 +550,21 @@ function meaningfullyDiffers(a, b) {
   return norm(a) !== norm(b);
 }
 
+/* Pull a single "LABEL: value" line out of the dossier text. */
+function parseDossierField(text, label) {
+  if (!text) return "";
+  const m = text.match(new RegExp(`^\\s*${label}\\s*:\\s*(.+)$`, "im"));
+  return m ? m[1].trim() : "";
+}
+
+/* CSS pill class for a CONTACT TYPE value. */
+function contactTypeClass(type) {
+  const t = (type || "").toLowerCase();
+  if (t.includes("founder") || t.includes("exec")) return "high";
+  if (t.includes("connector")) return "med";
+  return "low";
+}
+
 /* ============================================================
    3) Drafts — split review screen
    ============================================================ */
@@ -666,6 +681,9 @@ function Drafts({ leads = [], loading = false, selectedId, setSelectedId, update
   const needsResearch = selected && !selected.draft;
   const approved = selected?.status === "approved";
   const sources = selected ? extractSources(selected.research) : [];
+  const contactType = selected ? parseDossierField(selected.research, "CONTACT TYPE") : "";
+  const contactTypeShort = contactType.split(/—|\s-\s/)[0].trim();
+  const suggestedIntent = selected ? parseDossierField(selected.research, "SUGGESTED INTENT") : "";
 
   return (
     <PageFrame pageKey="drafts">
@@ -720,6 +738,17 @@ function Drafts({ leads = [], loading = false, selectedId, setSelectedId, update
             </div>
 
             <div className="draft-body">
+              {(contactTypeShort || suggestedIntent) && (
+                <div className="intent-strip">
+                  {contactTypeShort && (
+                    <span className={cx("icp", contactTypeClass(contactType))} title={contactType}>
+                      {contactTypeShort}
+                    </span>
+                  )}
+                  {suggestedIntent && <span className="intent-line">{suggestedIntent}</span>}
+                </div>
+              )}
+
               <div className="field-label">
                 <span>Message</span>
                 <span style={{ textTransform: "none", letterSpacing: 0, fontWeight: 500, color: "var(--quiet)" }}>
@@ -1142,6 +1171,20 @@ function Qualify({ onOpenDraft, onRefreshLeads }) {
                   {row.status === "done" && row.result?.reasoning && (
                     <p className="qualify-reason">{row.result.reasoning}</p>
                   )}
+
+                  {row.status === "done" &&
+                    (row.result?.contactType || row.result?.suggestedIntent) && (
+                      <div className="intent-strip qualify-intent">
+                        {row.result?.contactType && (
+                          <span className={cx("icp", contactTypeClass(row.result.contactType))}>
+                            {row.result.contactType}
+                          </span>
+                        )}
+                        {row.result?.suggestedIntent && (
+                          <span className="intent-line">{row.result.suggestedIntent}</span>
+                        )}
+                      </div>
+                    )}
 
                   {row.crmMessage && (
                     <div className={cx("qualify-crm-msg", row.crmAdded && "ok")}>

@@ -84,11 +84,19 @@
    - Do NOT describe anything as "recent" / "just" / "this week" unless the dossier dated that item within the last 60 days.
    - Reference at most ONE or TWO concrete verified facts. More reads as research-stalking, not warmth.
 
+   === AIM THE MESSAGE AT THE INTENT (this controls WHAT you ask for) ===
+   The dossier contains a SUGGESTED INTENT line and a CONTACT TYPE. The message MUST be aimed at that intent:
+   - If the intent is to PITCH (ICP founder/exec): write the customer pitch — connect Agilow to their delivery/PM situation and ask for a short call.
+   - If the intent is to ASK FOR INTRODUCTIONS (Connector): write an intro-request. Acknowledge their role/network, and ask if they'd point you to / introduce you to early-stage robotics companies who might need lightweight delivery/PM help. Do NOT pitch Agilow as a product to them.
+   - If the intent is LIGHT NETWORKING (Engineer/IC, or Adjacent): keep it casual and genuine — a peer note or a question about their work. NO sell, no ask for a sales call.
+   - If the intent is SKIP / Not relevant: still produce a brief, polite, low-effort note (the human may not send it), with no pitch.
+   HARD RULE: NEVER pitch Agilow as a product to a Connector or an Engineer/IC. Match the ask to the intent, not to a default sales script. If CONTACT TYPE/INTENT is missing or Unknown, default to a light, non-salesy note.
+
    === STRUCTURE (persona may flavor tone, NOT change this) ===
    - 3 short paragraphs max. Under ~110 words total. Shorter is better.
    - Para 1: open on the real connection/reason (per the notes) + the single strongest verified hook from the dossier.
-   - Para 2: one sentence connecting Agilow to exactly where they are now (early-stage robotics/autonomy, scaling, nearing first deployment, likely no formal PM yet). Their situation, not a pitch.
-   - Para 3: ONE clear, low-friction ask. A 15-min call OR a quick reply, not both.
+   - Para 2: ONE sentence that serves the SUGGESTED INTENT (for a pitch: connect Agilow to where they are now — early-stage robotics/autonomy, scaling, likely no formal PM yet; for an intro-request: the kind of company you'd love an intro to; for networking: a genuine point of connection). Their situation, not a generic pitch.
+   - Para 3: ONE clear, low-friction ask that matches the intent (a 15-min call for a pitch; "would you be open to pointing me to anyone?" for an intro-request; a casual reply for networking). Not both.
    - Sign off exactly: — {{OWNER_NAME}}, Agilow
    - No subject line. NO em dashes. Plain, direct, human.
 
@@ -246,6 +254,23 @@ SCORING — apply MECHANICALLY. The written verdict MUST match these rules exact
 - MODERATE = not Weak and not Strong (e.g. C false but A/B/E true, or exactly one of A/B/E is unknown while none is false).
 - CONSISTENCY CHECK before writing the verdict: if none of A/B/E is false and none is unknown, the lead is at minimum Moderate (it CANNOT be Weak). If A/B/E are all true on VERIFIED facts and C is true, it IS Strong.
 
+=== CONTACT TYPE & INTENT (classify WHO this person is and WHAT to ask them for) ===
+Using the verified PERSON BACKGROUND + company facts, classify CONTACT TYPE as exactly one of:
+- "ICP founder/exec" — a decision-maker (founder, C-level, VP/Head) at a company that fits the ICP. They can buy.
+- "Connector" — runs or works at an accelerator, robotics network/association, venture studio, VC/investor, or is clearly a well-networked hub in the robotics ecosystem. They can introduce you to others.
+- "Engineer/IC" — an individual contributor (engineer, designer, scientist) who is NOT a decision-maker.
+- "Adjacent" — in robotics/autonomy but the company is NOT ICP and the person is not an obvious connector.
+- "Not relevant" — outside robotics/autonomy, or clearly not a fit for outreach.
+- "Unknown" — the verified facts don't make the type clear.
+Then write SUGGESTED INTENT: one short line for the natural reason to reach out, matched to the type:
+- ICP founder/exec -> "Pitch Agilow as a fit for their delivery/PM needs."
+- Connector -> "Ask for introductions to robotics companies in their network."
+- Engineer/IC -> "Light networking / learn about their team; not a direct sell."
+- Adjacent -> "Low priority; networking only."
+- Not relevant -> "Skip."
+- Unknown -> "Verify who they are before reaching out."
+Note: CONTACT TYPE is independent of ICP FIT — e.g. Joel Reed (ex-Pittsburgh Robotics Network) is a Connector even if his current company's ICP fit is weak/unknown.
+
 === OUTPUT (exact structure; every fact line ends with a [TAG] and a (source)) ===
 LEAD: {{LEAD_NAME}}, {{LEAD_TITLE}} at {{COMPANY}}
 
@@ -267,8 +292,10 @@ C. In early-deployment band (pre / at / early-scaling first deployment): <true|f
 D. No dedicated PM yet: <true|false|unknown> — <evidence>
 E. Early-stage (not large/old/established-at-scale): <true|false|unknown> — <evidence>
 ICP FIT: <Strong | Moderate | Moderate (unverified) | Weak> — one sentence, consistent with the booleans above.
+CONTACT TYPE: <ICP founder/exec | Connector | Engineer/IC | Adjacent | Not relevant | Unknown> — short reason from verified facts.
+SUGGESTED INTENT: <one short line, matched to the contact type per the rules above>
 
-RECOMMENDED ANGLE: <1-2 sentences using ONLY [VERIFIED] facts; only call something recent if dated <60 days>
+RECOMMENDED ANGLE: <1-2 sentences using ONLY [VERIFIED] facts; aimed at the SUGGESTED INTENT; only call something recent if dated <60 days>
 CONFIDENCE & GAPS: <which gating facts (A/B/C/E) are unverified or low-confidence, and what to verify before sending>`;
 
 /* ============================================================
