@@ -3,3 +3,8 @@ dist/
 .DS_Store
 .vercel/
 *.log
+
+# Local env files (never commit real keys). .env.example IS committed.
+.env
+.env.*
+!.env.example

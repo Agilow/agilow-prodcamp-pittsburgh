@@ -1,0 +1,980 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
+import {
+  LayoutDashboard,
+  Inbox,
+  FileText,
+  Send,
+  MessageSquareText,
+  Settings as SettingsIcon,
+  Search,
+  Sparkles,
+} from "lucide-react";
+import "./hub.css";
+import { apiUrl } from "./api.js";
+
+/* ============================================================
+   Avatar palette — rotates through orange / navy / purple /
+   tan-brown / green per the design system.
+   ============================================================ */
+const palette = ["#e8472a", "#13294b", "#5b5bd6", "#b7791f", "#087f5b"];
+
+/* ============================================================
+   Leads are loaded at runtime from the Notion CRM via
+   GET /api/leads (see server/). Shape per lead:
+   { id, notionPageId, company, contact, role, hook,
+     draft, channel, icp, status, initials, color }
+   replies/sent below remain mock (out of scope).
+   ============================================================ */
+
+const channelLabel = { inmail: "InMail", linkedin: "LinkedIn", email: "Email" };
+
+/* Recent replies (overview + replies page source) */
+const replies = [
+  {
+    id: "LD-014",
+    contact: "Maya Chen",
+    company: "Northwind Robotics",
+    initials: "MC",
+    color: palette[1],
+    snippet: "Interesting — can you send a couple of times for next week?",
+    channel: "inmail",
+    status: "good",
+    time: "2h",
+  },
+  {
+    id: "LD-009",
+    contact: "Tom Becker",
+    company: "Vela Systems",
+    initials: "TB",
+    color: palette[1],
+    snippet: "Yes, let's set up a call. I'll loop in our scrum lead.",
+    channel: "inmail",
+    status: "good",
+    time: "5h",
+  },
+  {
+    id: "LD-010",
+    contact: "Sofia Romero",
+    company: "Tideline",
+    initials: "SR",
+    color: palette[3],
+    snippet: "What does pricing look like for a team our size?",
+    channel: "email",
+    status: "pending",
+    time: "1d",
+  },
+  {
+    id: "LD-013",
+    contact: "Devin Park",
+    company: "Brightloop AI",
+    initials: "DP",
+    color: palette[2],
+    snippet: "Not the right moment — reach back out in Q3 though.",
+    channel: "linkedin",
+    status: "pending",
+    time: "2d",
+  },
+];
+
+/* Sent log */
+const sent = [
+  { id: "LD-018", contact: "Elena Voss", company: "Sequora", initials: "EV", color: palette[2], channel: "linkedin", time: "Today 9:12", status: "replied" },
+  { id: "LD-017", contact: "Jordan Hale", company: "Driftwood", initials: "JH", color: palette[4], channel: "email", time: "Today 8:40", status: "opened" },
+  { id: "LD-016", contact: "Priya Nair", company: "Cadence Health", initials: "PN", color: palette[0], channel: "linkedin", time: "Yest 6:05", status: "opened" },
+  { id: "LD-015", contact: "Marcus Webb", company: "Forge Labs", initials: "MW", color: palette[4], channel: "email", time: "Yest 5:21", status: "delivered" },
+  { id: "LD-014", contact: "Maya Chen", company: "Northwind Robotics", initials: "MC", color: palette[1], channel: "inmail", time: "Yest 2:48", status: "replied" },
+  { id: "LD-012", contact: "Aisha Khan", company: "Lumen Data", initials: "AK", color: palette[2], channel: "linkedin", time: "Mon 4:10", status: "opened" },
+  { id: "LD-011", contact: "Sofia Romero", company: "Tideline", initials: "SR", color: palette[3], channel: "email", time: "Mon 11:32", status: "delivered" },
+  { id: "LD-009", contact: "Tom Becker", company: "Vela Systems", initials: "TB", color: palette[1], channel: "inmail", time: "Mon 9:58", status: "replied" },
+];
+
+const nav = [
+  { id: "overview", label: "Overview", icon: LayoutDashboard },
+  { id: "queue", label: "Lead Queue", icon: Inbox, count: 10 },
+  { id: "drafts", label: "Drafts", icon: FileText },
+  { id: "sent", label: "Sent", icon: Send },
+  { id: "replies", label: "Replies", icon: MessageSquareText, count: 4 },
+  { id: "settings", label: "Settings", icon: SettingsIcon },
+];
+
+function cx(...classes) {
+  return classes.filter(Boolean).join(" ");
+}
+
+function Avatar({ initials, color, size = "md" }) {
+  return (
+    <span className={cx("avatar", `avatar-${size}`)} style={{ background: color }}>
+      {initials}
+    </span>
+  );
+}
+
+/* ============================================================
+   Sidebar topographic contour texture — same animated canvas
+   as the main dashboard so both products feel identical.
+   ============================================================ */
+let sharedT = 0;
+const clockListeners = new Set();
+let clockStarted = false;
+function startSharedClock() {
+  if (clockStarted) return;
+  clockStarted = true;
+  function tick() {
+    sharedT += 0.012;
+    clockListeners.forEach((fn) => fn(sharedT));
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+}
+
+function AnimatedBackground() {
+  const canvasRef = useRef(null);
+  useEffect(() => {
+    startSharedClock();
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
+
+    function resize() {
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = canvas.offsetWidth * dpr;
+      canvas.height = canvas.offsetHeight * dpr;
+      ctx.scale(dpr, dpr);
+    }
+
+    const ro = new ResizeObserver(resize);
+    ro.observe(canvas);
+    resize();
+
+    function drawFrame(t) {
+      const w = canvas.offsetWidth;
+      const h = canvas.offsetHeight;
+      const vw = 1400;
+      ctx.clearRect(0, 0, w, h);
+
+      function drawSet(count, direction, colorFn) {
+        for (let i = 0; i < count; i++) {
+          const frac = i / count;
+          ctx.strokeStyle = colorFn(frac);
+          ctx.lineWidth = 0.75;
+          ctx.beginPath();
+          const baseY = frac * h;
+          const amp = (65 * Math.sin(frac * Math.PI) + 20) * (h / 700);
+          for (let x = 0; x <= w; x += 2) {
+            const xp = x / vw;
+            const y =
+              baseY +
+              amp * Math.sin(xp * Math.PI * 4 + direction * t * 0.45 + i * 0.28) +
+              amp * 0.45 * Math.sin(xp * Math.PI * 7 + direction * t * 0.28 + i * 0.14);
+            if (x === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+          }
+          ctx.stroke();
+        }
+      }
+
+      drawSet(38, 1, (frac) => `rgba(10,${Math.round(190 + frac * 35)},225,${0.10 + frac * 0.18})`);
+      drawSet(28, -1, (frac) => `rgba(${Math.round(80 + frac * 60)},60,220,${0.08 + frac * 0.14})`);
+    }
+
+    clockListeners.add(drawFrame);
+    drawFrame(sharedT);
+    return () => {
+      clockListeners.delete(drawFrame);
+      ro.disconnect();
+    };
+  }, []);
+
+  return <canvas ref={canvasRef} className="animated-bg-canvas" />;
+}
+
+/* ============================================================
+   Shell
+   ============================================================ */
+function Shell({ active, setActive, children }) {
+  return (
+    <div className="app-shell">
+      <aside className="sidebar">
+        <AnimatedBackground />
+        <div className="sidebar-content">
+          <div className="brand">
+            <img src="/agi2-nobg.png" alt="Agilow" className="brand-logo" />
+          </div>
+
+          <div className="quick-search" style={{ cursor: "default" }}>
+            <Search size={14} />
+            <span>Search leads</span>
+            <kbd>⌘K</kbd>
+          </div>
+
+          <nav className="nav-list">
+            {nav.map((item) => {
+              const Icon = item.icon;
+              return (
+                <button
+                  key={item.id}
+                  className={cx("nav-item", active === item.id && "active")}
+                  onClick={() => setActive(item.id)}
+                >
+                  <Icon size={16} />
+                  <span>{item.label}</span>
+                  {item.count ? <span className="nav-count">{item.count}</span> : null}
+                </button>
+              );
+            })}
+          </nav>
+
+          <div className="sidebar-section">
+            <div className="sidebar-label">Pipeline</div>
+            <div className="sprint-card">
+              <div className="sprint-row">
+                <span>This week</span>
+                <strong>32%</strong>
+              </div>
+              <div className="progress-line">
+                <motion.span
+                  initial={{ width: 0 }}
+                  animate={{ width: "32%" }}
+                  transition={{ duration: 0.8, ease: [0.22, 1, 0.36, 1] }}
+                />
+              </div>
+              <div className="sprint-meta">
+                <span>32 / 100 sent</span>
+              </div>
+              <div className="pipe-replies">8 replies</div>
+            </div>
+          </div>
+
+          <div className="sidebar-footer">
+            <Avatar initials="SP" color={palette[0]} />
+            <div>
+              <div className="user-name">Shiv Panjwani</div>
+              <div className="user-meta">Founder workspace</div>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <main className="main">{children}</main>
+
+      <nav className="mobile-nav">
+        {nav.map((item) => {
+          const Icon = item.icon;
+          return (
+            <button
+              key={item.id}
+              className={cx("mobile-nav-item", active === item.id && "active")}
+              onClick={() => setActive(item.id)}
+            >
+              <Icon size={20} />
+              <span>{item.label}</span>
+            </button>
+          );
+        })}
+      </nav>
+    </div>
+  );
+}
+
+function PageFrame({ children, pageKey }) {
+  return (
+    <motion.section
+      key={pageKey}
+      className="page"
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -4 }}
+      transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+    >
+      {children}
+    </motion.section>
+  );
+}
+
+/* ============================================================
+   1) Overview
+   ============================================================ */
+function Overview({ leads = [], loading = false }) {
+  const queue = leads.slice(0, 6);
+  return (
+    <PageFrame pageKey="overview">
+      <div className="hub-page-wrap">
+        <div className="page-header hero-header">
+          <div className="hero-copy">
+            <h1>Outreach</h1>
+            <p className="lede">
+              May 19–25 · 52 messages out, 5 replies in. Reply rate is holding at 9% — Northwind
+              and Vela are warm and need same-day follow-up.
+            </p>
+          </div>
+        </div>
+
+        <div className="decision-strip hub-strip">
+          {[
+            ["Leads sourced", "287", "All-time, Apollo"],
+            ["Messages sent", "52", "This week"],
+            ["Reply rate", "9%", "5 of 52"],
+            ["Meetings booked", "2", "This sprint"],
+          ].map(([label, value, note], index) => (
+            <motion.div
+              className="signal-cell"
+              key={label}
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: index * 0.05, duration: 0.28 }}
+            >
+              <span>{label}</span>
+              <strong>{value}</strong>
+              <small>{note}</small>
+            </motion.div>
+          ))}
+        </div>
+
+        <section className="panel priority-panel hub-section">
+          <div className="panel-title queue-title">
+            <div>
+              <h2>Today Queue</h2>
+              <p>Leads with approved drafts, ready to send.</p>
+            </div>
+            <span className="pill queue-count">{loading ? "…" : `${queue.length} ready`}</span>
+          </div>
+          <div className="decision-list">
+            {loading && (
+              <div className="decision-row" style={{ cursor: "default" }}>
+                <span className="decision-id">—</span>
+                <div className="decision-copy">
+                  <span>Loading leads…</span>
+                  <small>Fetching from Notion</small>
+                </div>
+              </div>
+            )}
+            {!loading && queue.length === 0 && (
+              <div className="decision-row" style={{ cursor: "default" }}>
+                <span className="decision-id">—</span>
+                <div className="decision-copy">
+                  <span>No leads yet</span>
+                  <small>Add leads to your Notion database</small>
+                </div>
+              </div>
+            )}
+            {queue.map((lead) => (
+              <button className="decision-row" key={lead.id}>
+                <span className="decision-id">{lead.id}</span>
+                <div className="decision-copy">
+                  <span>
+                    {lead.company} · {lead.contact}
+                  </span>
+                  <small>{lead.hook}</small>
+                </div>
+                <div className="decision-meta">
+                  <span className="channel-tag">{channelLabel[lead.channel]}</span>
+                  <Avatar initials={lead.initials} color={lead.color} size="sm" />
+                </div>
+              </button>
+            ))}
+          </div>
+        </section>
+
+        <section className="panel priority-panel hub-section">
+          <div className="panel-title queue-title">
+            <div>
+              <h2>Recent Replies</h2>
+              <p>Inbound responses from the last 48 hours.</p>
+            </div>
+            <span className="pill queue-count">{replies.length} new</span>
+          </div>
+          <div className="decision-list">
+            {replies.map((r) => (
+              <button className="decision-row" key={r.id}>
+                <span className="decision-id">
+                  <span className={cx("status-dot", r.status === "good" ? "done" : "active")} />
+                </span>
+                <div className="decision-copy">
+                  <span>{r.contact}</span>
+                  <small>{r.snippet}</small>
+                </div>
+                <div className="decision-meta">
+                  <span className="channel-tag">{r.time}</span>
+                  <Avatar initials={r.initials} color={r.color} size="sm" />
+                </div>
+              </button>
+            ))}
+          </div>
+        </section>
+      </div>
+    </PageFrame>
+  );
+}
+
+/* ============================================================
+   2) Lead Queue
+   ============================================================ */
+const filters = ["All", "InMail", "LinkedIn", "Email"];
+
+function LeadQueue({ leads = [], loading = false, error = null, onDraft }) {
+  const [filter, setFilter] = useState("All");
+  const [checked, setChecked] = useState({});
+  const visible = leads.filter((l) =>
+    filter === "All" ? true : channelLabel[l.channel] === filter
+  );
+
+  return (
+    <PageFrame pageKey="queue">
+      <div className="hub-page-wrap">
+        <div className="page-header tight">
+          <div>
+            <p className="eyebrow">Apollo source · ICP scored</p>
+            <h1>Lead Queue</h1>
+          </div>
+          <span className="pill queue-count" style={{ height: 22, fontSize: 12 }}>
+            {loading ? "…" : `${visible.length} leads`}
+          </span>
+        </div>
+
+        <div className="filter-bar">
+          <div className="seg-group">
+            {filters.map((f) => (
+              <button
+                key={f}
+                className={cx("seg", filter === f && "active")}
+                onClick={() => setFilter(f)}
+              >
+                {f}
+              </button>
+            ))}
+          </div>
+          <div className="hub-search">
+            <Search size={14} />
+            <input placeholder="Search company or contact…" />
+          </div>
+        </div>
+
+        <div className="lead-table">
+          <div className="lead-head">
+            <span />
+            <span>ID</span>
+            <span>Company</span>
+            <span>Contact</span>
+            <span>ICP fit</span>
+            <span>Source</span>
+            <span>Channel</span>
+            <span />
+          </div>
+          {loading && <div className="lead-empty">Loading leads from Notion…</div>}
+          {!loading && error && <div className="lead-empty error">{error}</div>}
+          {!loading && !error && visible.length === 0 && (
+            <div className="lead-empty">No leads match this filter.</div>
+          )}
+          {visible.map((lead) => (
+            <div
+              key={lead.id}
+              className={cx("lead-row", checked[lead.id] && "selected")}
+            >
+              <input
+                type="checkbox"
+                checked={!!checked[lead.id]}
+                onChange={() =>
+                  setChecked((c) => ({ ...c, [lead.id]: !c[lead.id] }))
+                }
+              />
+              <span className="lead-id">{lead.id}</span>
+              <span className="lead-company">{lead.company}</span>
+              <div className="lead-contact">
+                <strong>{lead.contact}</strong>
+                <small>{lead.role}</small>
+              </div>
+              <span className={cx("icp", lead.icp)}>
+                {lead.icp === "high" ? "High" : lead.icp === "med" ? "Med" : "Low"}
+              </span>
+              <span className="source-tag">Apollo</span>
+              <span className={cx("chip", lead.channel)}>{channelLabel[lead.channel]}</span>
+              <button className="draft-btn" onClick={() => onDraft(lead.id)}>
+                Draft
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+    </PageFrame>
+  );
+}
+
+/* ============================================================
+   3) Drafts — split review screen
+   ============================================================ */
+function Drafts({ leads = [], loading = false, selectedId, setSelectedId, updateLead }) {
+  const selected = leads.find((l) => l.id === selectedId) ?? leads[0] ?? null;
+
+  const [text, setText] = useState(selected?.draft ?? "");
+  const [researching, setResearching] = useState(false);
+  const [researchError, setResearchError] = useState(null);
+  const [approving, setApproving] = useState(false);
+  const [approveError, setApproveError] = useState(null);
+
+  // Reset the textarea (and clear transient errors) when switching leads.
+  // Approve & Send persists first, so switching no longer loses saved edits.
+  useEffect(() => {
+    setText(selected?.draft ?? "");
+    setResearchError(null);
+    setApproveError(null);
+  }, [selected?.id]);
+
+  async function runResearch() {
+    if (!selected) return;
+    setResearching(true);
+    setResearchError(null);
+    updateLead(selected.id, { status: "researching" }); // optimistic
+    try {
+      const res = await fetch(apiUrl("/api/research"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ notionPageId: selected.notionPageId }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Research failed");
+      updateLead(selected.id, {
+        draft: data.draft,
+        status: "drafted",
+      });
+      setText(data.draft);
+    } catch (e) {
+      setResearchError(e.message);
+      updateLead(selected.id, { status: "new" });
+    } finally {
+      setResearching(false);
+    }
+  }
+
+  async function runApprove() {
+    if (!selected) return;
+    setApproving(true);
+    setApproveError(null);
+    try {
+      const res = await fetch(apiUrl("/api/approve"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ notionPageId: selected.notionPageId, draft: text }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Approve failed");
+      updateLead(selected.id, { draft: text, status: "approved" });
+    } catch (e) {
+      setApproveError(e.message);
+    } finally {
+      setApproving(false);
+    }
+  }
+
+  const needsResearch = selected && !selected.draft;
+  const approved = selected?.status === "approved";
+
+  return (
+    <PageFrame pageKey="drafts">
+      <div className="page-header tight" style={{ marginBottom: 16 }}>
+        <div>
+          <p className="eyebrow">{loading ? "Loading…" : `${leads.length} drafts pending review`}</p>
+          <h1>Drafts</h1>
+        </div>
+      </div>
+
+      <div className="draft-split">
+        <div className="draft-list">
+          <div className="draft-list-head">
+            {loading ? "Loading…" : `Pending review · ${leads.length}`}
+          </div>
+          {leads.map((lead) => (
+            <button
+              key={lead.id}
+              className={cx("draft-item", lead.id === selected?.id && "active")}
+              onClick={() => setSelectedId(lead.id)}
+            >
+              <Avatar initials={lead.initials} color={lead.color} size="sm" />
+              <div className="draft-item-copy">
+                <strong>{lead.contact || lead.company}</strong>
+                <small>{lead.company} · {lead.hook || "Not researched yet"}</small>
+              </div>
+              <span className={cx("chip", lead.channel)}>{channelLabel[lead.channel]}</span>
+            </button>
+          ))}
+        </div>
+
+        {!selected ? (
+          <div className="draft-panel">
+            <div className="draft-empty">
+              {loading ? "Loading leads from Notion…" : "No leads in the queue."}
+            </div>
+          </div>
+        ) : (
+          <div className="draft-panel">
+            <div className="draft-panel-head">
+              <Avatar initials={selected.initials} color={selected.color} />
+              <div className="dp-main">
+                <strong>
+                  {selected.contact || selected.company}
+                  {selected.role ? ` · ${selected.role}` : ""}
+                </strong>
+                <small>{selected.company}</small>
+              </div>
+              <span className={cx("chip", selected.channel)} style={{ marginLeft: "auto" }}>
+                {channelLabel[selected.channel]}
+              </span>
+            </div>
+
+            <div className="draft-body">
+              <div className="field-label">
+                <span>Message</span>
+                <span style={{ textTransform: "none", letterSpacing: 0, fontWeight: 500, color: "var(--quiet)" }}>
+                  {text.length} chars
+                </span>
+              </div>
+              <textarea
+                className="draft-textarea"
+                value={text}
+                placeholder={
+                  needsResearch
+                    ? "No draft yet — run Research & draft to generate a personalized message."
+                    : ""
+                }
+                onChange={(e) => setText(e.target.value)}
+              />
+
+              {selected.channel === "inmail" && (
+                <div className="sales-nav-note">Sends from Shiv&apos;s Sales Navigator</div>
+              )}
+
+              {needsResearch ? (
+                <div className="draft-actions">
+                  <button className="btn-secondary" disabled={researching} onClick={runResearch}>
+                    {researching ? "Researching…" : "Research & draft"}
+                  </button>
+                </div>
+              ) : (
+                <div className="draft-actions">
+                  <button
+                    className="btn-send"
+                    disabled={approving || approved}
+                    onClick={runApprove}
+                  >
+                    {approved ? "Approved ✓" : approving ? "Saving…" : "Approve & Send"}
+                  </button>
+                  <button className="btn-secondary">Edit</button>
+                  <button className="btn-ghost">Skip</button>
+                </div>
+              )}
+
+              {researchError && <div className="draft-error">{researchError}</div>}
+              {approveError && <div className="draft-error">{approveError}</div>}
+            </div>
+          </div>
+        )}
+      </div>
+    </PageFrame>
+  );
+}
+
+/* ============================================================
+   4) Sent
+   ============================================================ */
+function Sent() {
+  return (
+    <PageFrame pageKey="sent">
+      <div className="hub-page-wrap">
+        <div className="page-header tight">
+          <div>
+            <p className="eyebrow">Last 7 days</p>
+            <h1>Sent</h1>
+          </div>
+          <span className="pill queue-count" style={{ height: 22, fontSize: 12 }}>
+            {sent.length} messages
+          </span>
+        </div>
+
+        <div className="list-card">
+          {sent.map((m) => (
+            <div className="sent-row" key={m.id + m.time}>
+              <span className="lead-id">{m.id}</span>
+              <div className="lead-contact">
+                <strong>{m.contact}</strong>
+                <small>{m.company}</small>
+              </div>
+              <span className={cx("chip", m.channel)}>{channelLabel[m.channel]}</span>
+              <span className="sent-time">{m.time}</span>
+              <span className={cx("dpill", m.status)}>
+                {m.status[0].toUpperCase() + m.status.slice(1)}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </PageFrame>
+  );
+}
+
+/* ============================================================
+   5) Replies
+   ============================================================ */
+function Replies() {
+  return (
+    <PageFrame pageKey="replies">
+      <div className="hub-page-wrap">
+        <div className="page-header tight">
+          <div>
+            <p className="eyebrow">Needs action</p>
+            <h1>Replies</h1>
+          </div>
+          <span className="pill queue-count" style={{ height: 22, fontSize: 12 }}>
+            {replies.length} replies
+          </span>
+        </div>
+
+        <div className="list-card">
+          {replies.map((r) => (
+            <div className="reply-row" key={r.id}>
+              <span className={cx("status-dot", r.status === "good" ? "done" : "active")} />
+              <div className="reply-copy">
+                <strong>
+                  {r.contact} · {r.company}
+                </strong>
+                <small>{r.snippet}</small>
+              </div>
+              <span className="channel-tag">{channelLabel[r.channel]}</span>
+              <div className="reply-actions">
+                <button className="btn-pos">Book call</button>
+                <button className="btn-mark">Mark positive</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </PageFrame>
+  );
+}
+
+/* ============================================================
+   6) Settings
+   ============================================================ */
+function Settings() {
+  const [toggles, setToggles] = useState({
+    salesNav: true,
+    teamLinkedin: true,
+    email: false,
+    autoSignal: true,
+  });
+  const flip = (k) => setToggles((t) => ({ ...t, [k]: !t[k] }));
+
+  return (
+    <PageFrame pageKey="settings">
+      <div className="page-header tight">
+        <div>
+          <p className="eyebrow">Outreach configuration</p>
+          <h1>Settings</h1>
+        </div>
+      </div>
+
+      <div className="settings-wrap">
+        <div className="settings-card">
+          <div className="panel-title">
+            <div>
+              <h2>Sending accounts</h2>
+              <p>Channels Agilow can send from on your behalf.</p>
+            </div>
+          </div>
+          <div className="set-row">
+            <Avatar initials="SP" color={palette[0]} size="sm" />
+            <div className="set-copy">
+              <strong>Shiv&apos;s Sales Navigator</strong>
+              <small>InMail · connected</small>
+            </div>
+            <div className={cx("toggle", toggles.salesNav && "on")} onClick={() => flip("salesNav")} />
+          </div>
+          <div className="set-row">
+            <Avatar initials="AG" color={palette[2]} size="sm" />
+            <div className="set-copy">
+              <strong>Agilow team LinkedIn</strong>
+              <small>LinkedIn · connected</small>
+            </div>
+            <div className={cx("toggle", toggles.teamLinkedin && "on")} onClick={() => flip("teamLinkedin")} />
+          </div>
+          <div className="set-row">
+            <Avatar initials="@" color={palette[3]} size="sm" />
+            <div className="set-copy">
+              <strong>outbound@agilow.ai</strong>
+              <small>Email · domain not verified</small>
+            </div>
+            <div className={cx("toggle", toggles.email && "on")} onClick={() => flip("email")} />
+          </div>
+        </div>
+
+        <div className="settings-card">
+          <div className="panel-title">
+            <div>
+              <h2>Daily limits</h2>
+              <p>Caps applied per channel to protect deliverability.</p>
+            </div>
+          </div>
+          <div className="set-row">
+            <span style={{ width: 21 }} />
+            <div className="set-copy">
+              <strong>InMail per day</strong>
+              <small>Recommended max for Sales Navigator</small>
+            </div>
+            <input className="set-input" defaultValue="20" />
+          </div>
+          <div className="set-row">
+            <span style={{ width: 21 }} />
+            <div className="set-copy">
+              <strong>LinkedIn connects per day</strong>
+              <small>Connection requests across team accounts</small>
+            </div>
+            <input className="set-input" defaultValue="25" />
+          </div>
+        </div>
+
+        <div className="settings-card">
+          <div className="panel-title">
+            <div>
+              <h2>Signals</h2>
+              <p>Sources Agilow uses to personalize each message.</p>
+            </div>
+          </div>
+          <div className="set-row">
+            <Sparkles size={18} color="var(--coral)" />
+            <div className="set-copy">
+              <strong>Auto-detect hiring &amp; funding signals</strong>
+              <small>Pulls from Apollo + LinkedIn activity</small>
+            </div>
+            <div className={cx("toggle", toggles.autoSignal && "on")} onClick={() => flip("autoSignal")} />
+          </div>
+        </div>
+      </div>
+    </PageFrame>
+  );
+}
+
+/* ============================================================
+   Splash — same loading screen as the main product.
+   ============================================================ */
+function SplashLoadingDots() {
+  const [dots, setDots] = useState("");
+  useEffect(() => {
+    const id = setInterval(() => setDots((d) => (d.length >= 3 ? "" : d + ".")), 500);
+    return () => clearInterval(id);
+  }, []);
+  return <span>{dots}</span>;
+}
+
+function SplashScreen({ onDone }) {
+  const [phase, setPhase] = useState(0);
+  useEffect(() => {
+    const t = setTimeout(() => setPhase(1), 2200);
+    return () => clearTimeout(t);
+  }, []);
+  return (
+    <motion.div
+      className="splash"
+      animate={phase === 2 ? { clipPath: "inset(0 calc(100% - 218px) 0 0)" } : { clipPath: "inset(0 0% 0 0)" }}
+      transition={{ duration: 0.85, ease: [0.22, 1, 0.36, 1] }}
+      onAnimationComplete={() => {
+        if (phase === 2) onDone();
+      }}
+    >
+      <AnimatedBackground />
+      <motion.div
+        className="splash-inner"
+        animate={phase >= 1 ? { opacity: 0, y: -110 } : { opacity: 1, y: 0 }}
+        transition={{ duration: 0.75, ease: [0.22, 1, 0.36, 1] }}
+        onAnimationComplete={() => {
+          if (phase === 1) setPhase(2);
+        }}
+      >
+        <img src="/agi2-nobg.png" className="splash-logo" />
+        <motion.p
+          className="splash-loading"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ delay: 0.4, duration: 0.6 }}
+        >
+          Loading Hub<SplashLoadingDots />
+        </motion.p>
+      </motion.div>
+    </motion.div>
+  );
+}
+
+/* ============================================================
+   Root
+   ============================================================ */
+export default function Hub() {
+  const [splash, setSplash] = useState(
+    () => !(typeof window !== "undefined" && window.location.search.includes("nosplash"))
+  );
+  const [active, setActive] = useState(() => {
+    const h = typeof window !== "undefined" ? window.location.hash.replace("#", "") : "";
+    return nav.some((n) => n.id === h) ? h : "overview";
+  });
+  const [selectedDraftId, setSelectedDraftId] = useState(null);
+
+  // ---- Data layer: leads come from the Notion CRM via GET /api/leads ----
+  const [leads, setLeads] = useState([]);
+  const [leadsLoading, setLeadsLoading] = useState(true);
+  const [leadsError, setLeadsError] = useState(null);
+
+  useEffect(() => {
+    let alive = true;
+    fetch(apiUrl("/api/leads"))
+      .then((r) => (r.ok ? r.json() : r.json().then((e) => Promise.reject(e))))
+      .then((data) => {
+        if (!alive) return;
+        const list = Array.isArray(data) ? data : [];
+        setLeads(list);
+        setSelectedDraftId((prev) => prev ?? list[0]?.id ?? null);
+        setLeadsLoading(false);
+      })
+      .catch((err) => {
+        if (!alive) return;
+        setLeadsError(err?.error || "Failed to load leads");
+        setLeadsLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Merge a partial patch into a single lead in state.
+  const updateLead = (id, patch) =>
+    setLeads((ls) => ls.map((l) => (l.id === id ? { ...l, ...patch } : l)));
+
+  const openDraft = (id) => {
+    setSelectedDraftId(id);
+    setActive("drafts");
+  };
+
+  const page = useMemo(() => {
+    const pages = {
+      overview: <Overview leads={leads} loading={leadsLoading} />,
+      queue: <LeadQueue leads={leads} loading={leadsLoading} error={leadsError} onDraft={openDraft} />,
+      drafts: (
+        <Drafts
+          leads={leads}
+          loading={leadsLoading}
+          selectedId={selectedDraftId}
+          setSelectedId={setSelectedDraftId}
+          updateLead={updateLead}
+        />
+      ),
+      sent: <Sent />,
+      replies: <Replies />,
+      settings: <Settings />,
+    };
+    return pages[active] ?? pages.overview;
+  }, [active, selectedDraftId, leads, leadsLoading, leadsError]);
+
+  return (
+    <>
+      <Shell active={active} setActive={setActive}>
+        <AnimatePresence mode="wait">{page}</AnimatePresence>
+      </Shell>
+      {splash && <SplashScreen onDone={() => setSplash(false)} />}
+    </>
+  );
+}

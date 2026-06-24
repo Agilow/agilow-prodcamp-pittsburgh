@@ -1,0 +1,27 @@
+# Render blueprint for the Agilow Hub backend (Express + Notion + OpenAI).
+# Deploy: Render dashboard -> New -> Blueprint -> point at this repo.
+# Secrets (sync:false) must be filled in the Render dashboard after creation.
+services:
+  - type: web
+    name: agilow-hub-api
+    runtime: node
+    rootDir: server
+    plan: free
+    buildCommand: npm install
+    startCommand: node index.js
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: NOTION_API_KEY
+        sync: false
+      - key: NOTION_DATABASE_ID
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-4.1
+      # Lock CORS to your Vercel URL(s) once known, comma-separated, e.g.
+      # https://agilow-hub.vercel.app
+      - key: CORS_ORIGIN
+        sync: false
+    # NOTE: do not set PORT — Render injects it and the server reads process.env.PORT.
