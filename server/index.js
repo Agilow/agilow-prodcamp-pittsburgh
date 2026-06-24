@@ -15,6 +15,7 @@ import {
   RESEARCH_PERSON,
   RESEARCH_RECENT,
   RESEARCH_VERIFY,
+  EXPLAIN_EDIT_PROMPT,
 } from "./prompts.js";
 
 // Prefer IPv4. Some hosts (e.g. Render) have flaky IPv6 egress that surfaces as
@@ -99,6 +100,7 @@ const PROPS = {
   owner: "Owner",          // select — who the message is from / signs it
   draft: "Draft",          // editable working copy (required; written by research + approve)
   aiDraft: "AI Draft",     // untouched AI original (optional; written by research only)
+  editReason: "Edit Reason", // why the human changed the draft (optional; written by approve)
   research: "Research",    // full research dossier (optional; written by research)
   status: "Status",        // status-type: write skipped unless the option exists
   code: "Code",            // optional short id; falls back to page id
@@ -109,15 +111,45 @@ const PROPS = {
 /* ============================================================
    Notion schema cache + type-aware read / write helpers
    ============================================================ */
-let dbSchemaCache = null;
+let dbSchemaCache = { at: 0, value: null };
 async function getDbSchema() {
-  if (dbSchemaCache) return dbSchemaCache;
+  // Short TTL so column renames/additions are picked up without a restart.
+  if (dbSchemaCache.value && Date.now() - dbSchemaCache.at < 60_000) {
+    return dbSchemaCache.value;
+  }
   const db = await withRetry(
     () => getNotion().databases.retrieve({ database_id: DATABASE_ID }),
     "databases.retrieve"
   );
-  dbSchemaCache = db.properties || {};
-  return dbSchemaCache;
+  dbSchemaCache = { at: Date.now(), value: db.properties || {} };
+  return dbSchemaCache.value;
+}
+
+/* Resolve a PROPS column name to the ACTUAL column in this DB, tolerating
+   parenthetical annotations the user may add (e.g. PROPS "Draft" matches a
+   real column "Draft(final and approved)"). Exact match wins; then a match on
+   the base name (text before any "(...)"); else the original (graceful skip). */
+const colBaseName = (s) =>
+  String(s || "")
+    .replace(/\s*\(.*?\)\s*$/, "")
+    .trim()
+    .toLowerCase();
+
+function resolveColName(schema, wanted) {
+  if (!schema || !wanted) return wanted;
+  if (schema[wanted]) return wanted;
+  const wb = colBaseName(wanted);
+  for (const name of Object.keys(schema)) {
+    if (colBaseName(name) === wb) return name;
+  }
+  return wanted;
+}
+
+/* Canonical key -> actual column name, resolved against the live schema. */
+function resolvePropMap(schema) {
+  const out = {};
+  for (const [key, name] of Object.entries(PROPS)) out[key] = resolveColName(schema, name);
+  return out;
 }
 
 /* Read a property's plain value regardless of its Notion type. */
@@ -198,11 +230,12 @@ function buildWrite(schema, name, value) {
   }
 }
 
-/* Assemble a Notion `properties` object, skipping unknown columns. */
+/* Assemble a Notion `properties` object, skipping unknown columns. Column
+   names are resolved against the live schema (tolerates "(...)" renames). */
 function writeProps(schema, entries) {
   const out = {};
   for (const [key, value] of Object.entries(entries)) {
-    const name = PROPS[key];
+    const name = resolveColName(schema, PROPS[key]);
     const payload = buildWrite(schema, name, value);
     if (payload) out[name] = payload;
   }
@@ -248,11 +281,12 @@ function initialsFrom(name, fallback) {
 function mapLead(page, index, schema) {
   const props = page.properties || {};
   const titleVal = titleValue(props);
+  const P = resolvePropMap(schema);
 
-  const company = readProp(props, PROPS.company) || titleVal || "Untitled";
-  const contact = readProp(props, PROPS.contact) || "";
-  const role = readProp(props, PROPS.role) || "";
-  const code = readProp(props, PROPS.code);
+  const company = readProp(props, P.company) || titleVal || "Untitled";
+  const contact = readProp(props, P.contact) || "";
+  const role = readProp(props, P.role) || "";
+  const code = readProp(props, P.code);
 
   return {
     id: code || page.id, // short code if present, else page id
@@ -260,42 +294,46 @@ function mapLead(page, index, schema) {
     company,
     contact,
     role,
-    hook: readProp(props, PROPS.warmTie) || "", // list subtitle = relationship note
-    draft: readProp(props, PROPS.draft) || "",
-    research: readProp(props, PROPS.research) || "", // dossier shown in the UI disclosure
-    channel: normChannel(readProp(props, PROPS.channel)),
-    icp: normIcp(readProp(props, PROPS.icp)),
-    status: normStatus(readProp(props, PROPS.status)),
+    hook: readProp(props, P.warmTie) || "", // list subtitle = relationship note
+    draft: readProp(props, P.draft) || "",
+    aiDraft: readProp(props, P.aiDraft) || "", // AI original, for edit-diff detection
+    research: readProp(props, P.research) || "", // dossier shown in the UI disclosure
+    channel: normChannel(readProp(props, P.channel)),
+    icp: normIcp(readProp(props, P.icp)),
+    status: normStatus(readProp(props, P.status)),
     initials: initialsFrom(contact, company),
     color: palette[index % palette.length],
   };
 }
 
 /* Pull the fields the research prompt needs from a single page. */
-function readResearchInputs(page) {
+function readResearchInputs(page, schema) {
   const props = page.properties || {};
   const titleVal = titleValue(props);
+  const P = resolvePropMap(schema);
   // This CRM has no Role column; useful context lives in Latest state + Notes.
-  const latest = readProp(props, PROPS.warmTie); // "Latest state " column
-  const notes = readProp(props, PROPS.notes);
+  const latest = readProp(props, P.warmTie); // "Latest state " column
+  const notes = readProp(props, P.notes);
   const warmTie = [latest, notes ? `Notes: ${notes}` : ""].filter(Boolean).join(" | ");
 
   return {
-    leadName: readProp(props, PROPS.contact) || "",
-    leadTitle: readProp(props, PROPS.role) || "",
-    company: readProp(props, PROPS.company) || titleVal || "",
-    linkedinUrl: readProp(props, PROPS.linkedin) || "",
-    companyUrl: readProp(props, PROPS.companyUrl) || "",
+    leadName: readProp(props, P.contact) || "",
+    leadTitle: readProp(props, P.role) || "",
+    company: readProp(props, P.company) || titleVal || "",
+    linkedinUrl: readProp(props, P.linkedin) || "",
+    companyUrl: readProp(props, P.companyUrl) || "",
     warmTie: warmTie || "",
-    owner: readProp(props, PROPS.owner) || "",
+    owner: readProp(props, P.owner) || "",
   };
 }
 
 /* The Draft column must already exist — we never create columns. Returns the
-   schema, or throws a clear error if the write-back column is missing. */
+   schema, or throws a clear error if the write-back column is missing.
+   Resolves the Draft name so "(...)" renames still count. */
 async function requireDraftColumn() {
   const schema = await getDbSchema();
-  if (!schema[PROPS.draft]) {
+  const draftName = resolveColName(schema, PROPS.draft);
+  if (!schema[draftName]) {
     throw new Error(
       `Notion database is missing a "${PROPS.draft}" text column. Add it to enable write-back.`
     );
@@ -306,21 +344,24 @@ async function requireDraftColumn() {
 /* ============================================================
    Edit-learning loop (in-context retrieval — NO training).
    Find leads where the human edited the AI draft, and feed those
-   before/after pairs back into the drafting prompt as examples.
+   before/after pairs (with WHY) back into the drafting prompt.
+   Per-owner: a draft only learns from THAT owner's own edits.
    ============================================================ */
 const normalizeText = (s) => (s || "").replace(/\s+/g, " ").trim();
 
-let editExamplesCache = { at: 0, value: null };
-async function getEditExamples() {
+// Cache ALL edited pairs (with owner) once; filter per-owner in memory.
+let editPairsCache = { at: 0, value: null };
+async function getAllEditPairs() {
   const now = Date.now();
-  if (editExamplesCache.value && now - editExamplesCache.at < 60_000) {
-    return editExamplesCache.value;
+  if (editPairsCache.value && now - editPairsCache.at < 60_000) {
+    return editPairsCache.value;
   }
-  let examples = [];
+  let pairs = [];
   try {
     const schema = await getDbSchema();
+    const P = resolvePropMap(schema);
     // Both columns must exist for there to be an edit signal to learn from.
-    if (schema[PROPS.aiDraft] && schema[PROPS.draft]) {
+    if (schema[P.aiDraft] && schema[P.draft]) {
       const query = await withRetry(
         () =>
           getNotion().databases.query({
@@ -332,31 +373,46 @@ async function getEditExamples() {
       );
       for (const page of query.results) {
         const props = page.properties || {};
-        const aiDraft = readProp(props, PROPS.aiDraft);
-        const humanEdited = readProp(props, PROPS.draft);
+        const aiDraft = readProp(props, P.aiDraft);
+        const humanEdited = readProp(props, P.draft);
+        const reason = readProp(props, P.editReason); // why the human changed it (may be "")
+        const owner = readProp(props, P.owner); // whose edit this is
         // Both present AND meaningfully different (human actually revised it).
         if (aiDraft && humanEdited && normalizeText(aiDraft) !== normalizeText(humanEdited)) {
-          examples.push({ aiDraft, humanEdited });
-          if (examples.length >= 3) break;
+          pairs.push({ aiDraft, humanEdited, reason, owner });
         }
       }
     }
   } catch (err) {
     console.warn("getEditExamples failed (continuing without):", err?.message || err);
-    examples = [];
+    pairs = [];
   }
-  editExamplesCache = { at: now, value: examples };
-  return examples;
+  editPairsCache = { at: now, value: pairs };
+  return pairs;
+}
+
+/* Up to 3 most-recent edit examples for the given owner. Falls back to all
+   owners only when no owner is known. */
+async function getEditExamples(owner) {
+  const pairs = await getAllEditPairs(); // already sorted most-recent-first
+  const want = (owner || "").trim().toLowerCase();
+  const scoped = want
+    ? pairs.filter((p) => (p.owner || "").trim().toLowerCase() === want)
+    : pairs;
+  return scoped.slice(0, 3);
 }
 
 function buildEditExamplesBlock(examples) {
   if (!examples || examples.length === 0) return "";
-  const parts = examples.map(
-    (ex, i) => `Example ${i + 1}:\nAI WROTE: ${ex.aiDraft}\nHUMAN CHANGED IT TO: ${ex.humanEdited}`
-  );
+  const parts = examples.map((ex, i) => {
+    let s = `Example ${i + 1}:\nAI WROTE: ${ex.aiDraft}\nHUMAN CHANGED IT TO: ${ex.humanEdited}`;
+    if (ex.reason && ex.reason.trim()) s += `\nWHY: ${ex.reason.trim()}`;
+    return s;
+  });
   return (
     "Here are recent examples of how the human revised earlier drafts. " +
-    "Learn their preferences and apply the same style:\n\n" +
+    "Learn their preferences and apply the same style. " +
+    "Apply the WHY principles to new drafts — these are the human's standing preferences, not one-offs:\n\n" +
     parts.join("\n\n")
   );
 }
@@ -620,13 +676,13 @@ app.post("/api/research", async (req, res) => {
       () => getNotion().pages.retrieve({ page_id: notionPageId }),
       "pages.retrieve"
     );
-    const inputs = readResearchInputs(page);
+    const inputs = readResearchInputs(page, schema);
     const ownerName = inputs.owner || "Shiv";
 
     const dossier = await researchDossier(inputs);
 
-    // Edit-learning: inject how the human revised earlier drafts (if any).
-    const editExamples = buildEditExamplesBlock(await getEditExamples());
+    // Edit-learning: inject how THIS owner revised earlier drafts (if any).
+    const editExamples = buildEditExamplesBlock(await getEditExamples(ownerName));
     const draft = await draftMessage({ dossier, warmTie: inputs.warmTie, ownerName, editExamples });
 
     if (!draft) throw new Error("Drafting returned an empty message");
@@ -654,19 +710,26 @@ app.post("/api/research", async (req, res) => {
   }
 });
 
-/* 3) POST /api/approve { notionPageId, draft } -> saves + marks approved (NEVER sends) */
+/* 3) POST /api/approve { notionPageId, draft, editReason? } -> saves + marks
+   approved (NEVER sends). editReason (if present) is written to the Edit Reason
+   column; skipped gracefully if that column is absent. */
 app.post("/api/approve", async (req, res) => {
-  const { notionPageId, draft } = req.body || {};
+  const { notionPageId, draft, editReason } = req.body || {};
   try {
     if (!notionPageId) throw new Error("notionPageId is required");
     if (typeof draft !== "string") throw new Error("draft (string) is required");
     const schema = await requireDraftColumn();
 
+    const entries = { draft, status: "approved" };
+    if (typeof editReason === "string" && editReason.trim()) {
+      entries.editReason = editReason.trim();
+    }
+
     await withRetry(
       () =>
         getNotion().pages.update({
           page_id: notionPageId,
-          properties: writeProps(schema, { draft, status: "approved" }),
+          properties: writeProps(schema, entries),
         }),
       "pages.update (approve)"
     );
@@ -675,6 +738,38 @@ app.post("/api/approve", async (req, res) => {
   } catch (err) {
     console.error("POST /api/approve failed:", err?.message || err);
     res.status(500).json({ error: err?.message || "Approve failed" });
+  }
+});
+
+/* 3b) POST /api/explain-edit { aiDraft, humanEdited } -> { reason }
+   Asks the AI to propose, in one line, WHY the human changed the draft.
+   The human confirms/edits this before it is saved (see /api/approve). */
+app.post("/api/explain-edit", async (req, res) => {
+  const { aiDraft, humanEdited } = req.body || {};
+  try {
+    if (typeof aiDraft !== "string" || typeof humanEdited !== "string") {
+      throw new Error("aiDraft and humanEdited (strings) are required");
+    }
+    const reason = await createResponseText(
+      {
+        model: OPENAI_MODEL,
+        temperature: 0.2,
+        input: [
+          { role: "system", content: EXPLAIN_EDIT_PROMPT },
+          {
+            role: "user",
+            content:
+              `AI DRAFT:\n${aiDraft}\n\nHUMAN EDITED VERSION:\n${humanEdited}\n\n` +
+              `Why did the human change it? Answer in ONE short sentence.`,
+          },
+        ],
+      },
+      "openai.explain-edit"
+    );
+    res.json({ reason: (reason || "").trim() });
+  } catch (err) {
+    console.error("POST /api/explain-edit failed:", err?.message || err);
+    res.status(500).json({ error: err?.message || "Explain-edit failed" });
   }
 });
 

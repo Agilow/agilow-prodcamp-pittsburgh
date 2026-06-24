@@ -271,6 +271,13 @@ ICP FIT: <Strong | Moderate | Moderate (unverified) | Weak> — one sentence, co
 RECOMMENDED ANGLE: <1-2 sentences using ONLY [VERIFIED] facts; only call something recent if dated <60 days>
 CONFIDENCE & GAPS: <which gating facts (A/B/C/E) are unverified or low-confidence, and what to verify before sending>`;
 
+/* ============================================================
+   Edit-learning: explain WHY the human changed a draft.
+   Used by POST /api/explain-edit. The two drafts go in the
+   user message; this is the system prompt.
+   ============================================================ */
+export const EXPLAIN_EDIT_PROMPT = `You are given an AI-written outreach draft and a human's edited version of it. In ONE short sentence, describe WHY the human likely changed it — the underlying preference or principle they applied, NOT a literal diff. Aim for a generalizable rule, in the style of: "Made it more formal", "Removed the assumed familiarity", "Shortened it", "More direct ask", "Cut the salesy phrasing", "Led with the signal instead of the intro". Return ONLY the sentence — no preamble, no quotes, no list.`;
+
 /* Generic placeholder filler for the passes above (and the verify pass). */
 export function fillPrompt(template, vars = {}) {
   const map = {

@@ -544,6 +544,12 @@ function extractSources(text) {
   return out.slice(0, 12);
 }
 
+/* Whitespace-insensitive comparison: did the human meaningfully edit the draft? */
+function meaningfullyDiffers(a, b) {
+  const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
+  return norm(a) !== norm(b);
+}
+
 /* ============================================================
    3) Drafts — split review screen
    ============================================================ */
@@ -556,6 +562,10 @@ function Drafts({ leads = [], loading = false, selectedId, setSelectedId, update
   const [approving, setApproving] = useState(false);
   const [approveError, setApproveError] = useState(null);
   const [showResearch, setShowResearch] = useState(false);
+  // Edit-reason confirmation step.
+  const [explaining, setExplaining] = useState(false);
+  const [showReasonPanel, setShowReasonPanel] = useState(false);
+  const [reasonText, setReasonText] = useState("");
 
   // Reset the textarea (and clear transient errors) when switching leads.
   // Approve & Send persists first, so switching no longer loses saved edits.
@@ -564,6 +574,8 @@ function Drafts({ leads = [], loading = false, selectedId, setSelectedId, update
     setResearchError(null);
     setApproveError(null);
     setShowResearch(false);
+    setShowReasonPanel(false);
+    setReasonText("");
   }, [selected?.id]);
 
   async function runResearch() {
@@ -582,6 +594,7 @@ function Drafts({ leads = [], loading = false, selectedId, setSelectedId, update
       if (!res.ok) throw new Error(data.error || "Research failed");
       updateLead(selected.id, {
         draft: data.draft,
+        aiDraft: data.draft, // the freshly generated text is the AI original
         research: data.research ?? "",
         status: "drafted",
       });
@@ -594,7 +607,38 @@ function Drafts({ leads = [], loading = false, selectedId, setSelectedId, update
     }
   }
 
-  async function runApprove() {
+  // "Approve & Send": if the human meaningfully edited the AI original, ask the
+  // AI to propose a reason and surface the confirm panel first; otherwise approve
+  // straight away.
+  async function startApprove() {
+    if (!selected) return;
+    setApproveError(null);
+    const aiOriginal = selected.aiDraft || selected.draft || "";
+    if (!meaningfullyDiffers(text, aiOriginal)) {
+      await doApprove(null);
+      return;
+    }
+    setExplaining(true);
+    let proposed = "";
+    try {
+      const res = await fetch(apiUrl("/api/explain-edit"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ aiDraft: aiOriginal, humanEdited: text }),
+      });
+      const data = await res.json();
+      if (res.ok) proposed = data.reason || "";
+    } catch {
+      /* fall through: panel still opens so the human can write the reason */
+    } finally {
+      setExplaining(false);
+    }
+    setReasonText(proposed);
+    setShowReasonPanel(true);
+  }
+
+  // The actual write. editReason is null when the human skipped the reason step.
+  async function doApprove(editReason) {
     if (!selected) return;
     setApproving(true);
     setApproveError(null);
@@ -602,11 +646,16 @@ function Drafts({ leads = [], loading = false, selectedId, setSelectedId, update
       const res = await fetch(apiUrl("/api/approve"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ notionPageId: selected.notionPageId, draft: text }),
+        body: JSON.stringify({
+          notionPageId: selected.notionPageId,
+          draft: text,
+          ...(editReason && editReason.trim() ? { editReason: editReason.trim() } : {}),
+        }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Approve failed");
       updateLead(selected.id, { draft: text, status: "approved" });
+      setShowReasonPanel(false);
     } catch (e) {
       setApproveError(e.message);
     } finally {
@@ -702,10 +751,16 @@ function Drafts({ leads = [], loading = false, selectedId, setSelectedId, update
                 <div className="draft-actions">
                   <button
                     className="btn-send"
-                    disabled={approving || approved || researching}
-                    onClick={runApprove}
+                    disabled={approving || approved || researching || explaining}
+                    onClick={startApprove}
                   >
-                    {approved ? "Approved ✓" : approving ? "Saving…" : "Approve & Send"}
+                    {approved
+                      ? "Approved ✓"
+                      : explaining
+                      ? "Analyzing edit…"
+                      : approving
+                      ? "Saving…"
+                      : "Approve & Send"}
                   </button>
                   <button className="btn-secondary" disabled={researching} onClick={runResearch}>
                     <RefreshCw
@@ -716,6 +771,38 @@ function Drafts({ leads = [], loading = false, selectedId, setSelectedId, update
                     {researching ? "Regenerating…" : "Regenerate"}
                   </button>
                   <button className="btn-ghost">Skip</button>
+                </div>
+              )}
+
+              {showReasonPanel && (
+                <div className="reason-panel">
+                  <label className="reason-label" htmlFor="edit-reason">
+                    Why did you change this? <span>helps the AI learn your preferences</span>
+                  </label>
+                  <input
+                    id="edit-reason"
+                    className="reason-input"
+                    value={reasonText}
+                    onChange={(e) => setReasonText(e.target.value)}
+                    placeholder="e.g. Made it more formal and removed the assumed familiarity"
+                    autoFocus
+                  />
+                  <div className="reason-actions">
+                    <button
+                      className="btn-send"
+                      disabled={approving}
+                      onClick={() => doApprove(reasonText)}
+                    >
+                      {approving ? "Saving…" : "Confirm & Approve"}
+                    </button>
+                    <button
+                      className="btn-ghost"
+                      disabled={approving}
+                      onClick={() => doApprove(null)}
+                    >
+                      Skip
+                    </button>
+                  </div>
                 </div>
               )}
 

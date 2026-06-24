@@ -1055,6 +1055,47 @@ input[type="checkbox"] {
   font-size: 12px;
   line-height: 1.45;
 }
+
+/* ---- Edit-reason confirmation (Drafts) ---- */
+.reason-panel {
+  display: grid;
+  gap: 10px;
+  margin-top: 2px;
+  padding: 14px 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: #f9f8f4;
+}
+.reason-label {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--ink);
+}
+.reason-label span {
+  margin-left: 4px;
+  font-weight: 500;
+  color: var(--quiet);
+}
+.reason-input {
+  width: 100%;
+  height: 38px;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: #fff;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--ink);
+  outline: none;
+  transition: border-color 120ms var(--ease);
+}
+.reason-input:focus {
+  border-color: var(--coral);
+}
+.reason-actions {
+  display: flex;
+  gap: 10px;
+}
 .lead-empty {
   padding: 22px 16px;
   text-align: center;
