@@ -567,6 +567,230 @@ input[type="checkbox"] {
   font-size: 13px;
 }
 
+/* ---- Qualify screen ---- */
+.qualify-page {
+  max-width: 920px;
+}
+.qualify-card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+  padding: 18px 18px 16px;
+  margin-bottom: 18px;
+}
+.qualify-card .panel-title {
+  margin-bottom: 12px;
+}
+.qualify-textarea {
+  width: 100%;
+  min-height: 120px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #faf9f6;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.5;
+  resize: vertical;
+  font-family: inherit;
+}
+.qualify-textarea:focus {
+  outline: none;
+  border-color: var(--line-strong);
+  background: #fff;
+}
+.qualify-textarea:disabled {
+  opacity: 0.65;
+}
+.qualify-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+.qualify-batch-error {
+  color: #b42318;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.qualify-results {
+  display: grid;
+  gap: 12px;
+}
+.qualify-row {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+  padding: 14px 16px 12px;
+}
+.qualify-row.qualifying {
+  border-color: #d4c8f5;
+  background: #fcfbff;
+}
+.qualify-row.errored {
+  border-color: #f0d4d0;
+}
+.qualify-row-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+}
+.qualify-row-identity {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.qualify-row-identity strong {
+  font-size: 13.5px;
+  font-weight: 650;
+}
+.qualify-row-identity small {
+  color: var(--quiet);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.qualify-row-actions {
+  display: inline-flex;
+  gap: 8px;
+}
+.qualify-draft-btn {
+  border-color: var(--coral);
+  color: var(--coral);
+}
+.qualify-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 20px;
+  padding: 0 9px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.qualify-status-pill.pending {
+  background: #f0efea;
+  color: #807a6e;
+}
+.qualify-status-pill.running {
+  background: #eef4fd;
+  color: #2864c9;
+}
+.qualify-status-pill.error {
+  background: #fdecea;
+  color: #b42318;
+}
+.qualify-reason {
+  margin: 10px 0 0;
+  color: #5c574d;
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+.qualify-error {
+  margin-top: 10px;
+  color: #b42318;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.qualify-crm-msg {
+  margin-top: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--quiet);
+}
+.qualify-crm-msg.ok {
+  color: #0b7f56;
+}
+.qualify-disclosure {
+  margin-top: 12px;
+  padding-top: 12px;
+}
+.qualify-checks {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.qualify-check {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #faf9f6;
+}
+.qualify-check-val {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 22px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 800;
+}
+.qualify-check.true .qualify-check-val {
+  background: #e7f5ee;
+  color: #0b7f56;
+}
+.qualify-check.false .qualify-check-val {
+  background: #fdecea;
+  color: #b42318;
+}
+.qualify-check.unknown .qualify-check-val {
+  background: #f0efea;
+  color: #807a6e;
+}
+.qualify-check-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+.qualify-check-copy strong {
+  font-size: 12px;
+  font-weight: 650;
+}
+.qualify-check-copy small {
+  color: var(--quiet);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+.qualify-facts {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0 0;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #f9f8f4;
+}
+.qualify-fact {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+.qualify-fact dt {
+  color: #8a857a;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.qualify-fact dd {
+  margin: 0;
+  color: #4a463e;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 /* ---- Generic list (Sent / Replies) reuses .decision-row look ---- */
 .list-card {
   border: 1px solid var(--line);

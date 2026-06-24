@@ -5,7 +5,17 @@ import cors from "cors";
 import { Client as NotionClient } from "@notionhq/client";
 import OpenAI from "openai";
 
-import { fillResearchPrompt, fillDraftingPrompt } from "./prompts.js";
+import {
+  fillPrompt,
+  fillDraftingPrompt,
+  RESEARCH_COMPANY,
+  RESEARCH_FUNDING,
+  RESEARCH_TEAM,
+  RESEARCH_HIRING,
+  RESEARCH_PERSON,
+  RESEARCH_RECENT,
+  RESEARCH_VERIFY,
+} from "./prompts.js";
 
 // Prefer IPv4. Some hosts (e.g. Render) have flaky IPv6 egress that surfaces as
 // intermittent "Premature close" / "fetch failed" when calling api.notion.com.
@@ -150,6 +160,16 @@ function titleValue(props) {
   return "";
 }
 
+/* Notion caps a single rich_text/title item at 2000 chars; split long strings
+   into multiple items so large dossiers don't get rejected. */
+function richChunks(value) {
+  const s = String(value ?? "");
+  if (s.length <= 2000) return [{ text: { content: s } }];
+  const out = [];
+  for (let i = 0; i < s.length; i += 2000) out.push({ text: { content: s.slice(i, i + 2000) } });
+  return out;
+}
+
 /* Build a single update payload entry, matched to the DB column type.
    Returns null if the property doesn't exist (so we skip it gracefully). */
 function buildWrite(schema, name, value) {
@@ -157,9 +177,9 @@ function buildWrite(schema, name, value) {
   if (!p) return null;
   switch (p.type) {
     case "title":
-      return { title: [{ text: { content: String(value ?? "") } }] };
+      return { title: richChunks(value) };
     case "rich_text":
-      return { rich_text: [{ text: { content: String(value ?? "") } }] };
+      return { rich_text: richChunks(value) };
     case "select":
       // Select options are auto-created by Notion when written, so this is safe.
       return { select: value ? { name: String(value) } : null };
@@ -353,24 +373,172 @@ async function createResponseText(params, label) {
   }, label);
 }
 
-async function researchDossier(inputs) {
-  const system = fillResearchPrompt(inputs);
+/* One targeted research pass: a web_search call driven by a system prompt. */
+async function runSearchPass(systemPrompt, label) {
   return createResponseText(
     {
       model: OPENAI_MODEL,
       temperature: 0.2,
       tools: [{ type: "web_search" }],
       input: [
-        { role: "system", content: system },
+        { role: "system", content: systemPrompt },
         {
           role: "user",
           content:
-            "Research this lead now using web search and return the dossier in exactly the required output structure.",
+            "Run this research pass now using web search. Return only the specified structured output, with a source URL on every fact line.",
         },
       ],
     },
-    "openai.research"
+    label
   );
+}
+
+/* Multi-step research: six targeted, source-tiered passes gathered in
+   parallel, then a verification + reconciliation + ICP-gate synthesis pass.
+   Returns the final dossier string (consumed by the drafting step). */
+async function researchDossier(inputs) {
+  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
+  const ctx = { ...inputs, today };
+
+  const passes = [
+    ["company", RESEARCH_COMPANY],
+    ["funding", RESEARCH_FUNDING],
+    ["team", RESEARCH_TEAM],
+    ["hiring", RESEARCH_HIRING],
+    ["person", RESEARCH_PERSON],
+    ["recent", RESEARCH_RECENT],
+  ];
+
+  // Passes are independent -> run concurrently for depth without serial latency.
+  const results = await Promise.all(
+    passes.map(async ([key, template]) => {
+      const text = await runSearchPass(fillPrompt(template, ctx), `openai.research.${key}`);
+      return [key, text];
+    })
+  );
+  const gathered = Object.fromEntries(results);
+
+  const rawResearch = passes
+    .map(([key]) => `### ${key.toUpperCase()} PASS\n${gathered[key] || "(no output)"}`)
+    .join("\n\n");
+
+  // warmTie already = "Latest state | Notes: ..." (the human's claims).
+  const verifySystem = fillPrompt(RESEARCH_VERIFY, {
+    ...ctx,
+    notesBlock: inputs.warmTie || "(none provided)",
+    rawResearch,
+  });
+
+  return runSearchPass(verifySystem, "openai.research.verify");
+}
+
+/* ============================================================
+   ICP qualification (score-only): reuse the research engine,
+   skip drafting, extract a structured verdict from the dossier.
+   ============================================================ */
+
+/* Extract structured ICP fields from the verify-pass dossier text. */
+async function extractVerdict(dossier) {
+  const resp = await withRetry(
+    () =>
+      getOpenAI().responses.create({
+        model: OPENAI_MODEL,
+        temperature: 0,
+        input: [
+          {
+            role: "system",
+            content:
+              "Extract structured fields from this Agilow ICP research dossier. Use ONLY what the dossier states — do not add, infer, or change any fact. Copy the ICP FIT verdict and the A-E checks exactly as written.",
+          },
+          { role: "user", content: `DOSSIER:\n${dossier}\n\nReturn the structured JSON.` },
+        ],
+        text: {
+          format: {
+            type: "json_schema",
+            name: "icp_qualification",
+            strict: true,
+            schema: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                verdict: {
+                  type: "string",
+                  enum: ["Strong", "Moderate", "Moderate (unverified)", "Weak"],
+                },
+                reasoning: { type: "string" },
+                checks: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    additionalProperties: false,
+                    properties: {
+                      criterion: { type: "string" },
+                      value: { type: "string", enum: ["true", "false", "unknown"] },
+                      evidence: { type: "string" },
+                    },
+                    required: ["criterion", "value", "evidence"],
+                  },
+                },
+                keyFacts: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    company: { type: "string" },
+                    funding: { type: "string" },
+                    headcount: { type: "string" },
+                    stage: { type: "string" },
+                    hiring: { type: "string" },
+                    recentActivity: { type: "string" },
+                  },
+                  required: ["company", "funding", "headcount", "stage", "hiring", "recentActivity"],
+                },
+              },
+              required: ["verdict", "reasoning", "checks", "keyFacts"],
+            },
+          },
+        },
+      }),
+    "openai.qualify.extract"
+  );
+  return JSON.parse((resp.output_text || "{}").trim());
+}
+
+/* Qualify one pasted lead end-to-end (research -> verdict), no drafting. */
+async function qualifyOne(lead = {}) {
+  const inputs = {
+    leadName: lead.name || "",
+    leadTitle: "",
+    company: lead.company || "",
+    linkedinUrl: lead.linkedinUrl || "",
+    companyUrl: lead.companyUrl || "",
+    warmTie: "", // no CRM notes for a pasted lead
+  };
+  const dossier = await researchDossier(inputs);
+  const structured = await extractVerdict(dossier);
+  return {
+    name: lead.name || "",
+    company: lead.company || "",
+    linkedinUrl: lead.linkedinUrl || "",
+    verdict: structured.verdict,
+    checks: structured.checks || [],
+    reasoning: structured.reasoning || "",
+    keyFacts: structured.keyFacts || {},
+    dossier,
+  };
+}
+
+/* Run an array of async tasks with bounded concurrency. */
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i], i);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
 }
 
 /* Returns the plain-text outreach message (the draft only). */
@@ -507,6 +675,87 @@ app.post("/api/approve", async (req, res) => {
   } catch (err) {
     console.error("POST /api/approve failed:", err?.message || err);
     res.status(500).json({ error: err?.message || "Approve failed" });
+  }
+});
+
+/* 4) POST /api/qualify
+   Single: { name, company, linkedinUrl?, companyUrl? } -> one result.
+   Batch:  { leads: [ {name, company, ...}, ... ] }       -> { results: [...] }.
+   Score-only: runs the research engine, returns the verdict, NO drafting,
+   NO Notion writes. */
+const QUALIFY_BATCH_MAX = 20;
+const QUALIFY_CONCURRENCY = 3;
+
+app.post("/api/qualify", async (req, res) => {
+  const body = req.body || {};
+  try {
+    if (Array.isArray(body.leads)) {
+      const leads = body.leads.slice(0, QUALIFY_BATCH_MAX);
+      if (leads.length === 0) throw new Error("leads array is empty");
+      const results = await mapLimit(leads, QUALIFY_CONCURRENCY, async (lead) => {
+        try {
+          return await qualifyOne(lead);
+        } catch (err) {
+          return {
+            name: lead?.name || "",
+            company: lead?.company || "",
+            error: err?.message || "Qualify failed",
+          };
+        }
+      });
+      return res.json({ results });
+    }
+
+    if (!body.name && !body.company) throw new Error("name or company is required");
+    const result = await qualifyOne(body);
+    return res.json(result);
+  } catch (err) {
+    console.error("POST /api/qualify failed:", err?.message || err);
+    res.status(500).json({ error: err?.message || "Qualify failed" });
+  }
+});
+
+/* 5) POST /api/add-to-crm { name, company, linkedinUrl?, verdict?, dossier? }
+   Creates a new page in the Notion CRM. Never auto-creates columns. */
+function fitFromVerdict(verdict) {
+  if (!verdict) return null;
+  if (/strong/i.test(verdict)) return "Strong";
+  if (/weak/i.test(verdict)) return "Weak";
+  return "Medium"; // Moderate / Moderate (unverified)
+}
+
+app.post("/api/add-to-crm", async (req, res) => {
+  const { name, company, linkedinUrl, verdict, dossier } = req.body || {};
+  try {
+    if (!name && !company) throw new Error("name or company is required");
+    const schema = await getDbSchema();
+
+    const noteParts = [];
+    if (verdict) noteParts.push(`ICP verdict: ${verdict}`);
+    if (linkedinUrl) noteParts.push(`LinkedIn: ${linkedinUrl}`);
+    noteParts.push("Added from the Qualify screen.");
+
+    const entries = {
+      company: company || name,
+      contact: name || "",
+      notes: noteParts.join(" | "),
+    };
+    const fit = fitFromVerdict(verdict);
+    if (fit) entries.icp = fit;
+    if (dossier) entries.research = dossier;
+    if (linkedinUrl) entries.linkedin = linkedinUrl;
+
+    const properties = writeProps(schema, entries);
+
+    const page = await withRetry(
+      () => getNotion().pages.create({ parent: { database_id: DATABASE_ID }, properties }),
+      "pages.create"
+    );
+
+    res.json({ ok: true, notionPageId: page.id });
+  } catch (err) {
+    console.error("POST /api/add-to-crm failed:", err?.message || err);
+    res.status(500).json({ error: err?.message || "Add to CRM failed" });
   }
 });
 

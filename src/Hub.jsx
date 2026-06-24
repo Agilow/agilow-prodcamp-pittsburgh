@@ -11,6 +11,7 @@ import {
   Sparkles,
   ChevronRight,
   RefreshCw,
+  Target,
 } from "lucide-react";
 import "./hub.css";
 import { apiUrl } from "./api.js";
@@ -93,6 +94,7 @@ const sent = [
 
 const nav = [
   { id: "overview", label: "Overview", icon: LayoutDashboard },
+  { id: "qualify", label: "Qualify", icon: Target },
   { id: "queue", label: "Lead Queue", icon: Inbox, count: 10 },
   { id: "drafts", label: "Drafts", icon: FileText },
   { id: "sent", label: "Sent", icon: Send },
@@ -776,6 +778,387 @@ function Drafts({ leads = [], loading = false, selectedId, setSelectedId, update
   );
 }
 
+/* Parse pasted lines: "Name, Company" or "Name, Company, LinkedInURL". */
+function parseLeadLines(text) {
+  return text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line, i) => {
+      const parts = line.split(",").map((p) => p.trim());
+      const name = parts[0] || "";
+      const company = parts[1] || "";
+      const third = parts[2] || "";
+      const linkedinUrl = third.startsWith("http") ? third : "";
+      return { id: `q-${i}-${name}-${company}`, name, company, linkedinUrl };
+    })
+    .filter((l) => l.name || l.company);
+}
+
+function verdictIcpClass(verdict) {
+  if (!verdict) return "med";
+  if (/strong/i.test(verdict)) return "high";
+  if (/weak/i.test(verdict)) return "low";
+  return "med";
+}
+
+function verdictRank(verdict) {
+  if (!verdict) return 9;
+  if (/strong/i.test(verdict)) return 0;
+  if (/moderate/i.test(verdict)) return 1;
+  return 2;
+}
+
+const KEY_FACT_LABELS = {
+  company: "Company",
+  funding: "Funding",
+  headcount: "Headcount",
+  stage: "Stage",
+  hiring: "Hiring",
+  recentActivity: "Recent activity",
+};
+
+/* ============================================================
+   Qualify — paste leads, score-only ICP fit, optional CRM / draft
+   ============================================================ */
+function Qualify({ onOpenDraft, onRefreshLeads }) {
+  const [input, setInput] = useState("");
+  const [rows, setRows] = useState([]);
+  const [running, setRunning] = useState(false);
+  const [batchError, setBatchError] = useState(null);
+
+  const patchRow = (id, patch) =>
+    setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+
+  async function runQualify() {
+    const leads = parseLeadLines(input);
+    if (leads.length === 0) return;
+
+    setBatchError(null);
+    setRunning(true);
+    setRows(
+      leads.map((l) => ({
+        ...l,
+        status: "pending",
+        result: null,
+        error: null,
+        expanded: false,
+        notionPageId: null,
+        crmAdded: false,
+        crmLoading: false,
+        draftLoading: false,
+        crmMessage: null,
+      }))
+    );
+
+    for (let i = 0; i < leads.length; i++) {
+      const lead = leads[i];
+      patchRow(lead.id, { status: "qualifying" });
+      try {
+        const res = await fetch(apiUrl("/api/qualify"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: lead.name,
+            company: lead.company,
+            linkedinUrl: lead.linkedinUrl || undefined,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Qualify failed");
+        patchRow(lead.id, { status: "done", result: data });
+      } catch (e) {
+        patchRow(lead.id, { status: "error", error: e.message });
+      }
+    }
+
+    setRunning(false);
+  }
+
+  async function addToCrm(row) {
+    patchRow(row.id, { crmLoading: true, crmMessage: null });
+    try {
+      const res = await fetch(apiUrl("/api/add-to-crm"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: row.name,
+          company: row.company,
+          linkedinUrl: row.linkedinUrl || undefined,
+          verdict: row.result?.verdict,
+          dossier: row.result?.dossier,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Add to CRM failed");
+      patchRow(row.id, {
+        crmLoading: false,
+        crmAdded: true,
+        notionPageId: data.notionPageId,
+        crmMessage: "Added to CRM",
+      });
+      if (onRefreshLeads) await onRefreshLeads();
+      return data.notionPageId;
+    } catch (e) {
+      patchRow(row.id, { crmLoading: false, crmMessage: e.message });
+      throw e;
+    }
+  }
+
+  async function handleAddToCrm(row) {
+    if (row.crmAdded || row.crmLoading) return;
+    try {
+      await addToCrm(row);
+    } catch {
+      /* message shown on row */
+    }
+  }
+
+  async function handleDraft(row) {
+    if (row.draftLoading || row.status !== "done") return;
+    patchRow(row.id, { draftLoading: true });
+    try {
+      let pageId = row.notionPageId;
+      if (!pageId) {
+        pageId = await addToCrm(row);
+      }
+      if (pageId && onOpenDraft) await onOpenDraft(pageId);
+    } catch {
+      /* crmMessage surfaces on row */
+    } finally {
+      patchRow(row.id, { draftLoading: false });
+    }
+  }
+
+  const sortedRows = useMemo(
+    () =>
+      [...rows].sort((a, b) => {
+        const ra = verdictRank(a.result?.verdict);
+        const rb = verdictRank(b.result?.verdict);
+        if (ra !== rb) return ra - rb;
+        return (a.name || a.company).localeCompare(b.name || b.company);
+      }),
+    [rows]
+  );
+
+  const doneCount = rows.filter((r) => r.status === "done" || r.status === "error").length;
+
+  return (
+    <PageFrame pageKey="qualify">
+      <div className="hub-page-wrap qualify-page">
+        <div className="page-header tight">
+          <div>
+            <p className="eyebrow">ICP qualification</p>
+            <h1>Qualify</h1>
+          </div>
+          {rows.length > 0 && (
+            <span className="pill queue-count" style={{ height: 22, fontSize: 12 }}>
+              {running ? `${doneCount} / ${rows.length}` : `${rows.filter((r) => r.status === "done").length} scored`}
+            </span>
+          )}
+        </div>
+
+        <div className="qualify-card">
+          <div className="panel-title">
+            <div>
+              <h2>Paste leads</h2>
+              <p>One per line — Name, Company or Name, Company, LinkedIn URL.</p>
+            </div>
+          </div>
+          <textarea
+            className="qualify-textarea"
+            placeholder={"Banks Hunter, Charge Robotics\nJeffrey Martin, Near Earth Autonomy\nEyal Cohen, Humble Robotics"}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            disabled={running}
+          />
+          <div className="qualify-actions">
+            <button
+              className="btn-secondary"
+              disabled={running || !input.trim()}
+              onClick={runQualify}
+            >
+              {running ? (
+                <>
+                  <RefreshCw size={13} className="spin" style={{ marginRight: 5 }} />
+                  Qualifying…
+                </>
+              ) : (
+                "Qualify"
+              )}
+            </button>
+            {batchError && <span className="qualify-batch-error">{batchError}</span>}
+          </div>
+        </div>
+
+        {sortedRows.length > 0 && (
+          <div className="qualify-results">
+            {sortedRows.map((row) => {
+              const verdict = row.result?.verdict;
+              const icpClass = verdictIcpClass(verdict);
+              const sources = row.result?.dossier ? extractSources(row.result.dossier) : [];
+
+              return (
+                <div
+                  key={row.id}
+                  className={cx(
+                    "qualify-row",
+                    row.status === "qualifying" && "qualifying",
+                    row.status === "error" && "errored"
+                  )}
+                >
+                  <div className="qualify-row-head">
+                    <div className="qualify-row-identity">
+                      <strong>{row.name || "—"}</strong>
+                      <small>{row.company || "—"}</small>
+                    </div>
+
+                    {row.status === "pending" && (
+                      <span className="qualify-status-pill pending">Queued</span>
+                    )}
+                    {row.status === "qualifying" && (
+                      <span className="qualify-status-pill running">
+                        <RefreshCw size={11} className="spin" /> Researching…
+                      </span>
+                    )}
+                    {row.status === "error" && (
+                      <span className="qualify-status-pill error">Failed</span>
+                    )}
+                    {row.status === "done" && (
+                      <span className={cx("icp", icpClass)}>{verdict}</span>
+                    )}
+
+                    {row.status === "done" && (
+                      <div className="qualify-row-actions">
+                        <button
+                          className="draft-btn"
+                          disabled={row.crmLoading || row.crmAdded}
+                          onClick={() => handleAddToCrm(row)}
+                        >
+                          {row.crmLoading ? "Adding…" : row.crmAdded ? "In CRM ✓" : "Add to CRM"}
+                        </button>
+                        <button
+                          className="draft-btn qualify-draft-btn"
+                          disabled={row.draftLoading}
+                          onClick={() => handleDraft(row)}
+                        >
+                          {row.draftLoading ? "Opening…" : "Draft"}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {row.status === "error" && (
+                    <div className="qualify-error">{row.error}</div>
+                  )}
+
+                  {row.status === "done" && row.result?.reasoning && (
+                    <p className="qualify-reason">{row.result.reasoning}</p>
+                  )}
+
+                  {row.crmMessage && (
+                    <div className={cx("qualify-crm-msg", row.crmAdded && "ok")}>
+                      {row.crmMessage}
+                    </div>
+                  )}
+
+                  {row.status === "done" && row.result && (
+                    <div className="research-disclosure qualify-disclosure">
+                      <button
+                        type="button"
+                        className="research-toggle"
+                        onClick={() => patchRow(row.id, { expanded: !row.expanded })}
+                      >
+                        <ChevronRight
+                          size={14}
+                          style={{
+                            transform: row.expanded ? "rotate(90deg)" : "none",
+                            transition: "transform 120ms var(--ease)",
+                          }}
+                        />
+                        ICP checks &amp; research
+                        {(row.result.checks || []).length > 0 && (
+                          <span className="research-count">{row.result.checks.length}</span>
+                        )}
+                      </button>
+
+                      {row.expanded && (
+                        <>
+                          {(row.result.checks || []).length > 0 && (
+                            <ul className="qualify-checks">
+                              {(row.result.checks || []).map((c) => (
+                                <li key={c.criterion} className={cx("qualify-check", c.value)}>
+                                  <span className="qualify-check-val">
+                                    {c.value === true
+                                      ? "Yes"
+                                      : c.value === false
+                                        ? "No"
+                                        : "?"}
+                                  </span>
+                                  <div className="qualify-check-copy">
+                                    <strong>{c.criterion}</strong>
+                                    {c.evidence && <small>{c.evidence}</small>}
+                                  </div>
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+
+                          {row.result.keyFacts && Object.keys(row.result.keyFacts).length > 0 && (
+                            <dl className="qualify-facts">
+                              {Object.entries(row.result.keyFacts).map(([key, val]) =>
+                                val ? (
+                                  <div key={key} className="qualify-fact">
+                                    <dt>{KEY_FACT_LABELS[key] || key}</dt>
+                                    <dd>{val}</dd>
+                                  </div>
+                                ) : null
+                              )}
+                            </dl>
+                          )}
+
+                          {sources.length > 0 && (
+                            <div className="source-chips">
+                              {sources.map((s) => (
+                                <a
+                                  key={s.host}
+                                  className="source-chip"
+                                  href={s.url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  title={s.host}
+                                >
+                                  <img
+                                    src={`https://www.google.com/s2/favicons?domain=${s.host}&sz=64`}
+                                    alt=""
+                                    loading="lazy"
+                                    onError={(e) => {
+                                      e.currentTarget.style.display = "none";
+                                    }}
+                                  />
+                                  <span>{s.host}</span>
+                                </a>
+                              ))}
+                            </div>
+                          )}
+
+                          {row.result.dossier && (
+                            <div className="research-body">{row.result.dossier}</div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </PageFrame>
+  );
+}
+
 /* ============================================================
    4) Sent
    ============================================================ */
@@ -1029,20 +1412,28 @@ export default function Hub() {
   const [leadsLoading, setLeadsLoading] = useState(true);
   const [leadsError, setLeadsError] = useState(null);
 
+  // Fetch leads from the CRM; returns the fresh list (also used to refresh
+  // after a Qualify -> Add-to-CRM so the new lead can flow into Drafts).
+  async function loadLeads() {
+    const r = await fetch(apiUrl("/api/leads"));
+    const data = await r.json();
+    if (!r.ok) throw new Error(data?.error || "Failed to load leads");
+    const list = Array.isArray(data) ? data : [];
+    setLeads(list);
+    return list;
+  }
+
   useEffect(() => {
     let alive = true;
-    fetch(apiUrl("/api/leads"))
-      .then((r) => (r.ok ? r.json() : r.json().then((e) => Promise.reject(e))))
-      .then((data) => {
+    loadLeads()
+      .then((list) => {
         if (!alive) return;
-        const list = Array.isArray(data) ? data : [];
-        setLeads(list);
         setSelectedDraftId((prev) => prev ?? list[0]?.id ?? null);
         setLeadsLoading(false);
       })
       .catch((err) => {
         if (!alive) return;
-        setLeadsError(err?.error || "Failed to load leads");
+        setLeadsError(err?.message || "Failed to load leads");
         setLeadsLoading(false);
       });
     return () => {
@@ -1059,9 +1450,24 @@ export default function Hub() {
     setActive("drafts");
   };
 
+  // Refetch leads, select the one matching a Notion page id, open Drafts.
+  async function openDraftForPage(notionPageId) {
+    setActive("drafts");
+    try {
+      const list = await loadLeads();
+      const match = list.find((l) => l.notionPageId === notionPageId);
+      setSelectedDraftId(match ? match.id : (prev) => prev ?? list[0]?.id ?? null);
+    } catch {
+      /* leads error surfaces on the Drafts screen */
+    }
+  }
+
   const page = useMemo(() => {
     const pages = {
       overview: <Overview leads={leads} loading={leadsLoading} />,
+      qualify: (
+        <Qualify onOpenDraft={openDraftForPage} onRefreshLeads={loadLeads} />
+      ),
       queue: <LeadQueue leads={leads} loading={leadsLoading} error={leadsError} onDraft={openDraft} />,
       drafts: (
         <Drafts
