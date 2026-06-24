@@ -60,6 +60,9 @@ function getOpenAI() {
     if (!process.env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY is not set");
     _openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY,
+      // Use Node's native (undici) fetch instead of the SDK's bundled node-fetch,
+      // which throws "Premature close" on Render's egress (same fix as Notion).
+      fetch: (url, init) => fetch(url, init),
       timeout: 180000, // long web-search research calls
       maxRetries: 4,
     });
