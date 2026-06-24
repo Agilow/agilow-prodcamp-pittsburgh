@@ -320,11 +320,19 @@ async function draftMessage({ dossier, warmTie, ownerName }) {
    ============================================================ */
 const app = express();
 // CORS: set CORS_ORIGIN to your Vercel URL(s) in production (comma-separated).
-// Unset = allow all origins (fine for local dev).
-const corsOrigin = process.env.CORS_ORIGIN
-  ? process.env.CORS_ORIGIN.split(",").map((s) => s.trim())
-  : true;
-app.use(cors({ origin: corsOrigin }));
+// Unset = allow all origins (fine for local dev). Trailing slashes are
+// normalized on both sides so "https://x.vercel.app/" matches "https://x.vercel.app".
+const stripSlash = (s) => s.trim().replace(/\/+$/, "");
+const allowedOrigins = process.env.CORS_ORIGIN
+  ? process.env.CORS_ORIGIN.split(",").map(stripSlash).filter(Boolean)
+  : null;
+app.use(
+  cors({
+    origin: allowedOrigins
+      ? (origin, cb) => cb(null, !origin || allowedOrigins.includes(stripSlash(origin)))
+      : true,
+  })
+);
 app.use(express.json({ limit: "1mb" }));
 
 app.get("/api/health", (_req, res) => res.json({ ok: true }));
