@@ -1,10 +1,34 @@
 import "dotenv/config";
+import dns from "node:dns";
 import express from "express";
 import cors from "cors";
 import { Client as NotionClient } from "@notionhq/client";
 import OpenAI from "openai";
 
 import { fillResearchPrompt, fillDraftingPrompt } from "./prompts.js";
+
+// Prefer IPv4. Some hosts (e.g. Render) have flaky IPv6 egress that surfaces as
+// intermittent "Premature close" / "fetch failed" when calling api.notion.com.
+dns.setDefaultResultOrder("ipv4first");
+
+// Retry transient network failures (dropped keep-alive sockets, premature close).
+async function withRetry(fn, label, attempts = 3) {
+  let lastErr;
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      const msg = err?.message || String(err);
+      const retryable =
+        /premature close|terminated|ECONNRESET|fetch failed|socket hang up|EAI_AGAIN|network|ETIMEDOUT/i.test(msg);
+      if (!retryable || i === attempts) throw err;
+      console.warn(`[retry] ${label} attempt ${i} failed: ${msg} — retrying`);
+      await new Promise((r) => setTimeout(r, 400 * i));
+    }
+  }
+  throw lastErr;
+}
 
 /* ============================================================
    Config
@@ -63,7 +87,10 @@ const PROPS = {
 let dbSchemaCache = null;
 async function getDbSchema() {
   if (dbSchemaCache) return dbSchemaCache;
-  const db = await getNotion().databases.retrieve({ database_id: DATABASE_ID });
+  const db = await withRetry(
+    () => getNotion().databases.retrieve({ database_id: DATABASE_ID }),
+    "databases.retrieve"
+  );
   dbSchemaCache = db.properties || {};
   return dbSchemaCache;
 }
@@ -307,7 +334,10 @@ app.get("/api/leads", async (_req, res) => {
   try {
     if (!DATABASE_ID) throw new Error("NOTION_DATABASE_ID is not set");
     const schema = await getDbSchema();
-    const query = await getNotion().databases.query({ database_id: DATABASE_ID, page_size: 100 });
+    const query = await withRetry(
+      () => getNotion().databases.query({ database_id: DATABASE_ID, page_size: 100 }),
+      "databases.query"
+    );
     const leads = query.results.map((page, i) => mapLead(page, i, schema));
     res.json(leads);
   } catch (err) {
@@ -323,7 +353,10 @@ app.post("/api/research", async (req, res) => {
     if (!notionPageId) throw new Error("notionPageId is required");
     const schema = await requireDraftColumn();
 
-    const page = await getNotion().pages.retrieve({ page_id: notionPageId });
+    const page = await withRetry(
+      () => getNotion().pages.retrieve({ page_id: notionPageId }),
+      "pages.retrieve"
+    );
     const inputs = readResearchInputs(page);
     const ownerName = inputs.owner || "Shiv";
 
@@ -332,10 +365,14 @@ app.post("/api/research", async (req, res) => {
 
     if (!draft) throw new Error("Drafting returned an empty message");
 
-    await getNotion().pages.update({
-      page_id: notionPageId,
-      properties: writeProps(schema, { draft, status: "drafted" }),
-    });
+    await withRetry(
+      () =>
+        getNotion().pages.update({
+          page_id: notionPageId,
+          properties: writeProps(schema, { draft, status: "drafted" }),
+        }),
+      "pages.update (research)"
+    );
 
     res.json({ draft });
   } catch (err) {
@@ -352,10 +389,14 @@ app.post("/api/approve", async (req, res) => {
     if (typeof draft !== "string") throw new Error("draft (string) is required");
     const schema = await requireDraftColumn();
 
-    await getNotion().pages.update({
-      page_id: notionPageId,
-      properties: writeProps(schema, { draft, status: "approved" }),
-    });
+    await withRetry(
+      () =>
+        getNotion().pages.update({
+          page_id: notionPageId,
+          properties: writeProps(schema, { draft, status: "approved" }),
+        }),
+      "pages.update (approve)"
+    );
 
     res.json({ ok: true, status: "approved" });
   } catch (err) {
