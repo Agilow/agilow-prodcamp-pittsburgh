@@ -43,7 +43,13 @@ let _notion;
 function getNotion() {
   if (!_notion) {
     if (!process.env.NOTION_API_KEY) throw new Error("NOTION_API_KEY is not set");
-    _notion = new NotionClient({ auth: process.env.NOTION_API_KEY });
+    _notion = new NotionClient({
+      auth: process.env.NOTION_API_KEY,
+      // Use Node's native (undici) fetch instead of the SDK's bundled node-fetch,
+      // which throws "Premature close" on Notion's gzipped responses on some
+      // hosts (e.g. Render). undici decompresses/streams robustly.
+      fetch: (url, init) => fetch(url, init),
+    });
   }
   return _notion;
 }
