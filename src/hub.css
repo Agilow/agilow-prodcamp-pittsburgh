@@ -472,6 +472,93 @@ input[type="checkbox"] {
 .btn-ghost:hover {
   color: var(--ink);
 }
+/* Research & sources disclosure (Drafts panel) */
+.research-disclosure {
+  margin-top: 2px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+.research-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: color 120ms var(--ease);
+}
+.research-toggle:hover {
+  color: var(--ink);
+}
+.research-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--quiet);
+  font-size: 10px;
+  font-weight: 700;
+}
+.source-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+.source-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  height: 26px;
+  padding: 0 9px 0 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: border-color 120ms var(--ease), color 120ms var(--ease);
+}
+.source-chip:hover {
+  border-color: var(--line-strong);
+  color: var(--ink);
+}
+.source-chip img {
+  width: 15px;
+  height: 15px;
+  border-radius: 3px;
+  flex: 0 0 auto;
+}
+.source-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.research-body {
+  margin-top: 10px;
+  max-height: 320px;
+  overflow: auto;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #f9f8f4;
+  color: #4a463e;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .draft-empty {
   display: grid;
   place-items: center;
@@ -691,6 +778,39 @@ input[type="checkbox"] {
   margin-top: 7px;
   color: rgba(255, 255, 255, 0.42);
   font-size: 11px;
+}
+
+/* ---- Sample/placeholder data lock: frosted + non-interactive ---- */
+.sample-lock {
+  position: relative;
+  border-radius: 12px;
+}
+.sample-lock-veil {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: inherit;
+  background: rgba(244, 243, 239, 0.3);
+  backdrop-filter: blur(3px) saturate(0.92);
+  -webkit-backdrop-filter: blur(3px) saturate(0.92);
+  cursor: not-allowed;
+  user-select: none;
+}
+.sample-lock-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  border-radius: 999px;
+  background: rgba(20, 20, 20, 0.82);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.14);
 }
 
 /* ---- Async states added for the Notion-wired Drafts flow ---- */

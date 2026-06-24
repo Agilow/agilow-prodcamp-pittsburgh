@@ -9,6 +9,8 @@ import {
   Settings as SettingsIcon,
   Search,
   Sparkles,
+  ChevronRight,
+  RefreshCw,
 } from "lucide-react";
 import "./hub.css";
 import { apiUrl } from "./api.js";
@@ -23,7 +25,7 @@ const palette = ["#e8472a", "#13294b", "#5b5bd6", "#b7791f", "#087f5b"];
    Leads are loaded at runtime from the Notion CRM via
    GET /api/leads (see server/). Shape per lead:
    { id, notionPageId, company, contact, role, hook,
-     draft, channel, icp, status, initials, color }
+     draft, research, channel, icp, status, initials, color }
    replies/sent below remain mock (out of scope).
    ============================================================ */
 
@@ -291,6 +293,21 @@ function PageFrame({ children, pageKey }) {
   );
 }
 
+/* Wraps placeholder/mock UI: frosts it over and blocks interaction so demo
+   data can't be clicked or mistaken for live data. */
+function SampleLock({ children, label = "Sample data" }) {
+  return (
+    <div className="sample-lock">
+      {children}
+      <div className="sample-lock-veil">
+        <span className="sample-lock-tag">
+          <Sparkles size={12} /> {label}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 /* ============================================================
    1) Overview
    ============================================================ */
@@ -309,26 +326,28 @@ function Overview({ leads = [], loading = false }) {
           </div>
         </div>
 
-        <div className="decision-strip hub-strip">
-          {[
-            ["Leads sourced", "287", "All-time, Apollo"],
-            ["Messages sent", "52", "This week"],
-            ["Reply rate", "9%", "5 of 52"],
-            ["Meetings booked", "2", "This sprint"],
-          ].map(([label, value, note], index) => (
-            <motion.div
-              className="signal-cell"
-              key={label}
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: index * 0.05, duration: 0.28 }}
-            >
-              <span>{label}</span>
-              <strong>{value}</strong>
-              <small>{note}</small>
-            </motion.div>
-          ))}
-        </div>
+        <SampleLock>
+          <div className="decision-strip hub-strip">
+            {[
+              ["Leads sourced", "287", "All-time, Apollo"],
+              ["Messages sent", "52", "This week"],
+              ["Reply rate", "9%", "5 of 52"],
+              ["Meetings booked", "2", "This sprint"],
+            ].map(([label, value, note], index) => (
+              <motion.div
+                className="signal-cell"
+                key={label}
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: index * 0.05, duration: 0.28 }}
+              >
+                <span>{label}</span>
+                <strong>{value}</strong>
+                <small>{note}</small>
+              </motion.div>
+            ))}
+          </div>
+        </SampleLock>
 
         <section className="panel priority-panel hub-section">
           <div className="panel-title queue-title">
@@ -375,32 +394,34 @@ function Overview({ leads = [], loading = false }) {
           </div>
         </section>
 
-        <section className="panel priority-panel hub-section">
-          <div className="panel-title queue-title">
-            <div>
-              <h2>Recent Replies</h2>
-              <p>Inbound responses from the last 48 hours.</p>
+        <SampleLock>
+          <section className="panel priority-panel hub-section">
+            <div className="panel-title queue-title">
+              <div>
+                <h2>Recent Replies</h2>
+                <p>Inbound responses from the last 48 hours.</p>
+              </div>
+              <span className="pill queue-count">{replies.length} new</span>
             </div>
-            <span className="pill queue-count">{replies.length} new</span>
-          </div>
-          <div className="decision-list">
-            {replies.map((r) => (
-              <button className="decision-row" key={r.id}>
-                <span className="decision-id">
-                  <span className={cx("status-dot", r.status === "good" ? "done" : "active")} />
-                </span>
-                <div className="decision-copy">
-                  <span>{r.contact}</span>
-                  <small>{r.snippet}</small>
-                </div>
-                <div className="decision-meta">
-                  <span className="channel-tag">{r.time}</span>
-                  <Avatar initials={r.initials} color={r.color} size="sm" />
-                </div>
-              </button>
-            ))}
-          </div>
-        </section>
+            <div className="decision-list">
+              {replies.map((r) => (
+                <button className="decision-row" key={r.id}>
+                  <span className="decision-id">
+                    <span className={cx("status-dot", r.status === "good" ? "done" : "active")} />
+                  </span>
+                  <div className="decision-copy">
+                    <span>{r.contact}</span>
+                    <small>{r.snippet}</small>
+                  </div>
+                  <div className="decision-meta">
+                    <span className="channel-tag">{r.time}</span>
+                    <Avatar initials={r.initials} color={r.color} size="sm" />
+                  </div>
+                </button>
+              ))}
+            </div>
+          </section>
+        </SampleLock>
       </div>
     </PageFrame>
   );
@@ -499,6 +520,28 @@ function LeadQueue({ leads = [], loading = false, error = null, onDraft }) {
   );
 }
 
+/* Pull unique source domains out of the research dossier text so we can
+   show favicon chips (like a research view). The dossier cites URLs inline. */
+function extractSources(text) {
+  if (!text) return [];
+  const matches = text.match(/https?:\/\/[^\s)\]}"'>]+/g) || [];
+  const seen = new Set();
+  const out = [];
+  for (const raw of matches) {
+    const cleaned = raw.replace(/[.,;:]+$/, ""); // trim trailing punctuation
+    try {
+      const host = new URL(cleaned).hostname.replace(/^www\./, "");
+      if (host && !seen.has(host)) {
+        seen.add(host);
+        out.push({ host, url: cleaned });
+      }
+    } catch {
+      /* ignore malformed URLs */
+    }
+  }
+  return out.slice(0, 12);
+}
+
 /* ============================================================
    3) Drafts — split review screen
    ============================================================ */
@@ -510,6 +553,7 @@ function Drafts({ leads = [], loading = false, selectedId, setSelectedId, update
   const [researchError, setResearchError] = useState(null);
   const [approving, setApproving] = useState(false);
   const [approveError, setApproveError] = useState(null);
+  const [showResearch, setShowResearch] = useState(false);
 
   // Reset the textarea (and clear transient errors) when switching leads.
   // Approve & Send persists first, so switching no longer loses saved edits.
@@ -517,10 +561,12 @@ function Drafts({ leads = [], loading = false, selectedId, setSelectedId, update
     setText(selected?.draft ?? "");
     setResearchError(null);
     setApproveError(null);
+    setShowResearch(false);
   }, [selected?.id]);
 
   async function runResearch() {
     if (!selected) return;
+    const prevStatus = selected.status; // restore this if it fails (regenerate case)
     setResearching(true);
     setResearchError(null);
     updateLead(selected.id, { status: "researching" }); // optimistic
@@ -534,12 +580,13 @@ function Drafts({ leads = [], loading = false, selectedId, setSelectedId, update
       if (!res.ok) throw new Error(data.error || "Research failed");
       updateLead(selected.id, {
         draft: data.draft,
+        research: data.research ?? "",
         status: "drafted",
       });
       setText(data.draft);
     } catch (e) {
       setResearchError(e.message);
-      updateLead(selected.id, { status: "new" });
+      updateLead(selected.id, { status: prevStatus });
     } finally {
       setResearching(false);
     }
@@ -567,6 +614,7 @@ function Drafts({ leads = [], loading = false, selectedId, setSelectedId, update
 
   const needsResearch = selected && !selected.draft;
   const approved = selected?.status === "approved";
+  const sources = selected ? extractSources(selected.research) : [];
 
   return (
     <PageFrame pageKey="drafts">
@@ -652,18 +700,74 @@ function Drafts({ leads = [], loading = false, selectedId, setSelectedId, update
                 <div className="draft-actions">
                   <button
                     className="btn-send"
-                    disabled={approving || approved}
+                    disabled={approving || approved || researching}
                     onClick={runApprove}
                   >
                     {approved ? "Approved ✓" : approving ? "Saving…" : "Approve & Send"}
                   </button>
-                  <button className="btn-secondary">Edit</button>
+                  <button className="btn-secondary" disabled={researching} onClick={runResearch}>
+                    <RefreshCw
+                      size={13}
+                      className={researching ? "spin" : undefined}
+                      style={{ marginRight: 5 }}
+                    />
+                    {researching ? "Regenerating…" : "Regenerate"}
+                  </button>
                   <button className="btn-ghost">Skip</button>
                 </div>
               )}
 
               {researchError && <div className="draft-error">{researchError}</div>}
               {approveError && <div className="draft-error">{approveError}</div>}
+
+              {selected.research && (
+                <div className="research-disclosure">
+                  <button
+                    type="button"
+                    className="research-toggle"
+                    onClick={() => setShowResearch((v) => !v)}
+                  >
+                    <ChevronRight
+                      size={14}
+                      style={{
+                        transform: showResearch ? "rotate(90deg)" : "none",
+                        transition: "transform 120ms var(--ease)",
+                      }}
+                    />
+                    Research &amp; sources
+                    {sources.length > 0 && (
+                      <span className="research-count">{sources.length}</span>
+                    )}
+                  </button>
+
+                  {sources.length > 0 && (
+                    <div className="source-chips">
+                      {sources.map((s) => (
+                        <a
+                          key={s.host}
+                          className="source-chip"
+                          href={s.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          title={s.host}
+                        >
+                          <img
+                            src={`https://www.google.com/s2/favicons?domain=${s.host}&sz=64`}
+                            alt=""
+                            loading="lazy"
+                            onError={(e) => {
+                              e.currentTarget.style.display = "none";
+                            }}
+                          />
+                          <span>{s.host}</span>
+                        </a>
+                      ))}
+                    </div>
+                  )}
+
+                  {showResearch && <div className="research-body">{selected.research}</div>}
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -689,22 +793,24 @@ function Sent() {
           </span>
         </div>
 
-        <div className="list-card">
-          {sent.map((m) => (
-            <div className="sent-row" key={m.id + m.time}>
-              <span className="lead-id">{m.id}</span>
-              <div className="lead-contact">
-                <strong>{m.contact}</strong>
-                <small>{m.company}</small>
+        <SampleLock>
+          <div className="list-card">
+            {sent.map((m) => (
+              <div className="sent-row" key={m.id + m.time}>
+                <span className="lead-id">{m.id}</span>
+                <div className="lead-contact">
+                  <strong>{m.contact}</strong>
+                  <small>{m.company}</small>
+                </div>
+                <span className={cx("chip", m.channel)}>{channelLabel[m.channel]}</span>
+                <span className="sent-time">{m.time}</span>
+                <span className={cx("dpill", m.status)}>
+                  {m.status[0].toUpperCase() + m.status.slice(1)}
+                </span>
               </div>
-              <span className={cx("chip", m.channel)}>{channelLabel[m.channel]}</span>
-              <span className="sent-time">{m.time}</span>
-              <span className={cx("dpill", m.status)}>
-                {m.status[0].toUpperCase() + m.status.slice(1)}
-              </span>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        </SampleLock>
       </div>
     </PageFrame>
   );
@@ -727,24 +833,26 @@ function Replies() {
           </span>
         </div>
 
-        <div className="list-card">
-          {replies.map((r) => (
-            <div className="reply-row" key={r.id}>
-              <span className={cx("status-dot", r.status === "good" ? "done" : "active")} />
-              <div className="reply-copy">
-                <strong>
-                  {r.contact} · {r.company}
-                </strong>
-                <small>{r.snippet}</small>
+        <SampleLock>
+          <div className="list-card">
+            {replies.map((r) => (
+              <div className="reply-row" key={r.id}>
+                <span className={cx("status-dot", r.status === "good" ? "done" : "active")} />
+                <div className="reply-copy">
+                  <strong>
+                    {r.contact} · {r.company}
+                  </strong>
+                  <small>{r.snippet}</small>
+                </div>
+                <span className="channel-tag">{channelLabel[r.channel]}</span>
+                <div className="reply-actions">
+                  <button className="btn-pos">Book call</button>
+                  <button className="btn-mark">Mark positive</button>
+                </div>
               </div>
-              <span className="channel-tag">{channelLabel[r.channel]}</span>
-              <div className="reply-actions">
-                <button className="btn-pos">Book call</button>
-                <button className="btn-mark">Mark positive</button>
-              </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        </SampleLock>
       </div>
     </PageFrame>
   );
@@ -771,7 +879,8 @@ function Settings() {
         </div>
       </div>
 
-      <div className="settings-wrap">
+      <SampleLock>
+        <div className="settings-wrap">
         <div className="settings-card">
           <div className="panel-title">
             <div>
@@ -846,7 +955,8 @@ function Settings() {
             <div className={cx("toggle", toggles.autoSignal && "on")} onClick={() => flip("autoSignal")} />
           </div>
         </div>
-      </div>
+        </div>
+      </SampleLock>
     </PageFrame>
   );
 }

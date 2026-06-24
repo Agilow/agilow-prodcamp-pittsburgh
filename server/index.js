@@ -80,7 +80,9 @@ const PROPS = {
   warmTie: "Latest state ", // rich_text describing the intro (note trailing space)
   notes: "Notes",          // rich_text — extra context fed to research
   owner: "Owner",          // select — who the message is from / signs it
-  draft: "Draft",          // written back by /api/research + /api/approve (must already exist)
+  draft: "Draft",          // editable working copy (required; written by research + approve)
+  aiDraft: "AI Draft",     // untouched AI original (optional; written by research only)
+  research: "Research",    // full research dossier (optional; written by research)
   status: "Status",        // status-type: write skipped unless the option exists
   code: "Code",            // optional short id; falls back to page id
   linkedin: "LinkedIn",    // optional url
@@ -233,6 +235,7 @@ function mapLead(page, index, schema) {
     role,
     hook: readProp(props, PROPS.warmTie) || "", // list subtitle = relationship note
     draft: readProp(props, PROPS.draft) || "",
+    research: readProp(props, PROPS.research) || "", // dossier shown in the UI disclosure
     channel: normChannel(readProp(props, PROPS.channel)),
     icp: normIcp(readProp(props, PROPS.icp)),
     status: normStatus(readProp(props, PROPS.status)),
@@ -274,6 +277,64 @@ async function requireDraftColumn() {
 }
 
 /* ============================================================
+   Edit-learning loop (in-context retrieval — NO training).
+   Find leads where the human edited the AI draft, and feed those
+   before/after pairs back into the drafting prompt as examples.
+   ============================================================ */
+const normalizeText = (s) => (s || "").replace(/\s+/g, " ").trim();
+
+let editExamplesCache = { at: 0, value: null };
+async function getEditExamples() {
+  const now = Date.now();
+  if (editExamplesCache.value && now - editExamplesCache.at < 60_000) {
+    return editExamplesCache.value;
+  }
+  let examples = [];
+  try {
+    const schema = await getDbSchema();
+    // Both columns must exist for there to be an edit signal to learn from.
+    if (schema[PROPS.aiDraft] && schema[PROPS.draft]) {
+      const query = await withRetry(
+        () =>
+          getNotion().databases.query({
+            database_id: DATABASE_ID,
+            page_size: 50,
+            sorts: [{ timestamp: "last_edited_time", direction: "descending" }],
+          }),
+        "databases.query (edit examples)"
+      );
+      for (const page of query.results) {
+        const props = page.properties || {};
+        const aiDraft = readProp(props, PROPS.aiDraft);
+        const humanEdited = readProp(props, PROPS.draft);
+        // Both present AND meaningfully different (human actually revised it).
+        if (aiDraft && humanEdited && normalizeText(aiDraft) !== normalizeText(humanEdited)) {
+          examples.push({ aiDraft, humanEdited });
+          if (examples.length >= 3) break;
+        }
+      }
+    }
+  } catch (err) {
+    console.warn("getEditExamples failed (continuing without):", err?.message || err);
+    examples = [];
+  }
+  editExamplesCache = { at: now, value: examples };
+  return examples;
+}
+
+function buildEditExamplesBlock(examples) {
+  if (!examples || examples.length === 0) return "";
+  const parts = examples.map(
+    (ex, i) => `Example ${i + 1}:\nAI WROTE: ${ex.aiDraft}\nHUMAN CHANGED IT TO: ${ex.humanEdited}`
+  );
+  return (
+    "Here are recent examples of how the human revised earlier drafts. " +
+    "Learn their preferences and apply the same style:\n\n" +
+    parts.join("\n\n")
+  );
+}
+
+/* ============================================================
    OpenAI: research (web search) -> dossier -> draft message
    ============================================================ */
 async function researchDossier(inputs) {
@@ -295,8 +356,8 @@ async function researchDossier(inputs) {
 }
 
 /* Returns the plain-text outreach message (the draft only). */
-async function draftMessage({ dossier, warmTie, ownerName }) {
-  const system = fillDraftingPrompt({ ownerName });
+async function draftMessage({ dossier, warmTie, ownerName, editExamples }) {
+  const system = fillDraftingPrompt({ ownerName, editExamples });
   const resp = await getOpenAI().responses.create({
     model: OPENAI_MODEL,
     temperature: 0.3,
@@ -360,7 +421,7 @@ app.get("/api/leads", async (_req, res) => {
   }
 });
 
-/* 2) POST /api/research { notionPageId } -> { draft } (+ writes Notion) */
+/* 2) POST /api/research { notionPageId } -> { draft, research } (+ writes Notion) */
 app.post("/api/research", async (req, res) => {
   const { notionPageId } = req.body || {};
   try {
@@ -375,20 +436,30 @@ app.post("/api/research", async (req, res) => {
     const ownerName = inputs.owner || "Shiv";
 
     const dossier = await researchDossier(inputs);
-    const draft = await draftMessage({ dossier, warmTie: inputs.warmTie, ownerName });
+
+    // Edit-learning: inject how the human revised earlier drafts (if any).
+    const editExamples = buildEditExamplesBlock(await getEditExamples());
+    const draft = await draftMessage({ dossier, warmTie: inputs.warmTie, ownerName, editExamples });
 
     if (!draft) throw new Error("Drafting returned an empty message");
 
+    // AI Draft = untouched original, Draft = editable working copy, Research = dossier.
+    // AI Draft / Research write is skipped automatically if those columns are absent.
     await withRetry(
       () =>
         getNotion().pages.update({
           page_id: notionPageId,
-          properties: writeProps(schema, { draft, status: "drafted" }),
+          properties: writeProps(schema, {
+            draft,
+            aiDraft: draft,
+            research: dossier,
+            status: "drafted",
+          }),
         }),
       "pages.update (research)"
     );
 
-    res.json({ draft });
+    res.json({ draft, research: dossier });
   } catch (err) {
     console.error("POST /api/research failed:", err?.message || err);
     res.status(500).json({ error: err?.message || "Research failed" });
