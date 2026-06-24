@@ -344,28 +344,18 @@ function buildEditExamplesBlock(examples) {
 /* ============================================================
    OpenAI: research (web search) -> dossier -> draft message
    ============================================================ */
-/* Stream a Responses API call and accumulate the text. Streaming keeps the
-   connection active during long web-search calls so intermediaries (e.g.
-   Render) don't drop the idle socket with "Premature close". Retried on
-   transient network errors. */
-async function streamResponseText(params, label) {
+/* Run a Responses API call and return the accumulated text. Uses the native
+   (undici) fetch configured on the client; retried on transient network errors. */
+async function createResponseText(params, label) {
   return withRetry(async () => {
-    const stream = await getOpenAI().responses.create({ ...params, stream: true });
-    let text = "";
-    for await (const event of stream) {
-      if (event.type === "response.output_text.delta") {
-        text += event.delta || "";
-      } else if (event.type === "response.error" || event.type === "error") {
-        throw new Error(event.error?.message || "OpenAI stream error");
-      }
-    }
-    return text.trim();
+    const resp = await getOpenAI().responses.create(params);
+    return (resp.output_text || "").trim();
   }, label);
 }
 
 async function researchDossier(inputs) {
   const system = fillResearchPrompt(inputs);
-  return streamResponseText(
+  return createResponseText(
     {
       model: OPENAI_MODEL,
       temperature: 0.2,
@@ -386,7 +376,7 @@ async function researchDossier(inputs) {
 /* Returns the plain-text outreach message (the draft only). */
 async function draftMessage({ dossier, warmTie, ownerName, editExamples }) {
   const system = fillDraftingPrompt({ ownerName, editExamples });
-  return streamResponseText(
+  return createResponseText(
     {
       model: OPENAI_MODEL,
       temperature: 0.3,
