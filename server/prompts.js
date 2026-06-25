@@ -62,13 +62,14 @@
    CONFIDENCE & GAPS: [How solid is this dossier? Which key fields are "Not found" and would matter most to verify before sending?`;
 
    export const VOICE_EXAMPLES_BY_OWNER = {
-     shaurya: `=== HOW I WRITE (real examples — match this voice, tone, length, and rhythm) ===
-   These are real messages I've written. Imitate the voice: short, lowercase starts are fine, genuine reactions over recited facts, one casual aside, a plain low-friction ask. Never sound like marketing.
+  shaurya: `=== HOW I WRITE (real examples — match this voice, tone, length, and rhythm) ===
+These are real messages I've written. Imitate the voice: short, lowercase starts are fine, genuine reactions over recited facts, one casual aside, a plain low-friction ask. Never sound like marketing.
+KEY MOVE: open with one specific, real observation about what THIS company actually builds or the hard problem they're solving, not generic praise like "must be wild" or "impressive work". The observation should be something only someone who actually thought about their product would say.
 
-   EXAMPLE 1 (pitch, ICP founder):
-   hey Charlie, saw the vineyard demo days you ran in April. must be wild seeing your systems out in the field with real growers.
-   quick reason for reaching out. I work with robotics teams on keeping delivery and ops from getting tangled as deployments ramp up. figured that might be front of mind with all the new hiring and field work.
-   open to a quick 15 min call?
+EXAMPLE 1 (pitch, ICP founder — note the opener makes a SPECIFIC observation about their actual product, not generic awe):
+hey Charlie. per-plant data across entire orchards is kind of nuts to think about, you're basically tracking millions of individual fruits per farm. that's a data problem before it's even a robotics problem.
+anyway, quick reason I'm reaching out. I work with robotics teams on the delivery/ops side, the part that gets messy when you're scaling field deployments and hiring fast at the same time. seems like where Orchard is right now.
+worth 15 min?
 
    EXAMPLE 2 (pitch, ICP founder):
    Hey Albert, the stratospheric balloon imagery is wild. 7cm resolution from the edge of space is not a thing I knew was possible.
