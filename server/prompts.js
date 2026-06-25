@@ -61,6 +61,37 @@
    RECOMMENDED ANGLE: [1-2 sentences: the single strongest, true hook to lead the outreach with, combining the warm tie + the most relevant verified signal.]
    CONFIDENCE & GAPS: [How solid is this dossier? Which key fields are "Not found" and would matter most to verify before sending?`;
 
+   export const VOICE_EXAMPLES_BY_OWNER = {
+     shaurya: `=== HOW I WRITE (real examples — match this voice, tone, length, and rhythm) ===
+   These are real messages I've written. Imitate the voice: short, lowercase starts are fine, genuine reactions over recited facts, one casual aside, a plain low-friction ask. Never sound like marketing.
+
+   EXAMPLE 1 (pitch, ICP founder):
+   hey Charlie, saw the vineyard demo days you ran in April. must be wild seeing your systems out in the field with real growers.
+   quick reason for reaching out. I work with robotics teams on keeping delivery and ops from getting tangled as deployments ramp up. figured that might be front of mind with all the new hiring and field work.
+   open to a quick 15 min call?
+
+   EXAMPLE 2 (pitch, ICP founder):
+   Hey Albert, the stratospheric balloon imagery is wild. 7cm resolution from the edge of space is not a thing I knew was possible.
+   quick reason I'm reaching out. I work with robotics teams on keeping delivery from turning into chaos as they scale past the first system. figured that might be live for you post Series B.
+   if it's worth 15 min, here's my calendar. no worries if not.
+
+   EXAMPLE 3 (connector, ask for intros):
+   Hi Josh, saw you hosted the Robotics & Tech Happy Hour last week.
+   I'm building Agilow, we help early robotics teams stay on top of delivery and project work. You're plugged into basically every robotics company in Pittsburgh, so figured I'd ask: anyone in your network who's drowning a bit in project coordination and might want a lighter way to handle it?
+   Worth a quick intro if so?
+
+   EXAMPLE 4 (connector, ask for intros):
+   Hi Matt, saw your post about Discovery Day coming up in September.
+   I'm building Agilow, we help early robotics teams stay on top of delivery and project work. You're connected to a ton of the robotics companies in Pittsburgh, so figured I'd ask: anyone you know who's wrestling with project coordination and might want a lighter way to handle it?
+   Worth a quick intro if so?`,
+   };
+
+   export function getVoiceExamples(ownerName) {
+     if (!ownerName) return "";
+     const key = ownerName.trim().toLowerCase();
+     return VOICE_EXAMPLES_BY_OWNER[key] || "";
+   }
+
    /* DRAFTING PROMPT — used verbatim as the system prompt for call 2.
       {{OWNER_NAME}} and {{PERSONA_BLOCK}} are filled via fillDraftingPrompt().
       Returns PLAIN TEXT (the message only). */
@@ -134,13 +165,17 @@
 
    Return ONLY the final message text itself, nothing else. No JSON, no preamble, no labels. Start with the greeting, end with "- {{OWNER_NAME}}, Agilow". Use \n\n between paragraphs.`;
 
-   /* Hardcoded persona for now (per instructions). Swap per-owner later. */
+   /* Neutral persona description when there are no specific examples yet. */
    export const DEFAULT_PERSONA = "Warm, direct, founder-to-founder, not salesy.";
 
    export function fillDraftingPrompt({ ownerName, personaBlock, editExamples } = {}) {
+   const resolvedOwner = ownerName || "Shiv";
+   const resolvedPersonaBlock =
+      personaBlock || getVoiceExamples(resolvedOwner) || DEFAULT_PERSONA;
+
    return DRAFTING_PROMPT
-      .replaceAll("{{OWNER_NAME}}", ownerName || "Shiv")
-      .replaceAll("{{PERSONA_BLOCK}}", personaBlock || DEFAULT_PERSONA)
+      .replaceAll("{{OWNER_NAME}}", resolvedOwner)
+      .replaceAll("{{PERSONA_BLOCK}}", resolvedPersonaBlock)
       .replaceAll("{{EDIT_EXAMPLES}}", editExamples || "");
    }
 
