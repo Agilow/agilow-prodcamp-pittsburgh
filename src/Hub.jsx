@@ -106,6 +106,15 @@ function cx(...classes) {
   return classes.filter(Boolean).join(" ");
 }
 
+/* First-two-initials for an avatar (mirrors the server's helper). */
+function initialsFrom(name, fallback) {
+  const source = (name || fallback || "").trim();
+  if (!source) return "??";
+  const parts = source.split(/\s+/).filter(Boolean);
+  const letters = parts.length >= 2 ? parts[0][0] + parts[1][0] : source.slice(0, 2);
+  return letters.toUpperCase();
+}
+
 function Avatar({ initials, color, size = "md" }) {
   return (
     <span className={cx("avatar", `avatar-${size}`)} style={{ background: color }}>
@@ -195,7 +204,10 @@ function AnimatedBackground() {
 /* ============================================================
    Shell
    ============================================================ */
-function Shell({ active, setActive, children }) {
+function Shell({ active, setActive, children, owner, setOwner, ownerOptions = [] }) {
+  // The saved owner may not be in the fetched option list yet — include it so
+  // the <select> always shows the current value.
+  const ownerChoices = Array.from(new Set([...(owner ? [owner] : []), ...ownerOptions]));
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -250,10 +262,24 @@ function Shell({ active, setActive, children }) {
           </div>
 
           <div className="sidebar-footer">
-            <Avatar initials="SP" color={palette[0]} />
-            <div>
-              <div className="user-name">Shiv Panjwani</div>
-              <div className="user-meta">Founder workspace</div>
+            <Avatar initials={initialsFrom(owner, "Shiv")} color={palette[0]} />
+            <div className="owner-picker">
+              <label className="owner-picker-label" htmlFor="owner-select">
+                Sending as
+              </label>
+              <select
+                id="owner-select"
+                className="owner-select"
+                value={owner || ""}
+                onChange={(e) => setOwner(e.target.value)}
+              >
+                {ownerChoices.length === 0 && <option value="">Shiv</option>}
+                {ownerChoices.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </select>
             </div>
           </div>
         </div>
@@ -568,7 +594,7 @@ function contactTypeClass(type) {
 /* ============================================================
    3) Drafts — split review screen
    ============================================================ */
-function Drafts({ leads = [], loading = false, selectedId, setSelectedId, updateLead }) {
+function Drafts({ leads = [], loading = false, selectedId, setSelectedId, updateLead, owner }) {
   const selected = leads.find((l) => l.id === selectedId) ?? leads[0] ?? null;
 
   const [text, setText] = useState(selected?.draft ?? "");
@@ -593,6 +619,31 @@ function Drafts({ leads = [], loading = false, selectedId, setSelectedId, update
     setReasonText("");
   }, [selected?.id]);
 
+  // Bulk "Draft all" queue state — drafts every lead that has no draft yet,
+  // one at a time (research is heavy: ~7 web-search calls per lead), mirroring
+  // the sequential queue on the Qualify screen.
+  const [bulkRunning, setBulkRunning] = useState(false);
+  const [bulkProgress, setBulkProgress] = useState({ done: 0, total: 0 });
+
+  // Research + draft a single lead and persist to Notion. Shared by the single
+  // and bulk paths. Returns the { draft, research } payload or throws.
+  async function researchLead(lead) {
+    const res = await fetch(apiUrl("/api/research"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ notionPageId: lead.notionPageId, owner: owner || undefined }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Research failed");
+    updateLead(lead.id, {
+      draft: data.draft,
+      aiDraft: data.draft, // the freshly generated text is the AI original
+      research: data.research ?? "",
+      status: "drafted",
+    });
+    return data;
+  }
+
   async function runResearch() {
     if (!selected) return;
     const prevStatus = selected.status; // restore this if it fails (regenerate case)
@@ -600,19 +651,7 @@ function Drafts({ leads = [], loading = false, selectedId, setSelectedId, update
     setResearchError(null);
     updateLead(selected.id, { status: "researching" }); // optimistic
     try {
-      const res = await fetch(apiUrl("/api/research"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ notionPageId: selected.notionPageId }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Research failed");
-      updateLead(selected.id, {
-        draft: data.draft,
-        aiDraft: data.draft, // the freshly generated text is the AI original
-        research: data.research ?? "",
-        status: "drafted",
-      });
+      const data = await researchLead(selected);
       setText(data.draft);
     } catch (e) {
       setResearchError(e.message);
@@ -620,6 +659,29 @@ function Drafts({ leads = [], loading = false, selectedId, setSelectedId, update
     } finally {
       setResearching(false);
     }
+  }
+
+  // Draft every lead that has no draft yet (skips approved/already-drafted),
+  // sequentially so we don't hammer the research API. Per-lead failures are
+  // skipped (status reset to "new") so one bad lead doesn't stop the run.
+  async function runResearchAll() {
+    if (bulkRunning) return;
+    const targets = leads.filter((l) => !l.draft && l.status !== "approved");
+    if (targets.length === 0) return;
+    setBulkRunning(true);
+    setResearchError(null);
+    setBulkProgress({ done: 0, total: targets.length });
+    for (const lead of targets) {
+      updateLead(lead.id, { status: "researching" });
+      try {
+        const data = await researchLead(lead);
+        if (lead.id === selected?.id) setText(data.draft); // sync open textarea
+      } catch {
+        updateLead(lead.id, { status: "new" });
+      }
+      setBulkProgress((p) => ({ ...p, done: p.done + 1 }));
+    }
+    setBulkRunning(false);
   }
 
   // "Approve & Send": if the human meaningfully edited the AI original, ask the
@@ -679,6 +741,7 @@ function Drafts({ leads = [], loading = false, selectedId, setSelectedId, update
   }
 
   const needsResearch = selected && !selected.draft;
+  const draftableCount = leads.filter((l) => !l.draft && l.status !== "approved").length;
   const approved = selected?.status === "approved";
   const sources = selected ? extractSources(selected.research) : [];
   const contactType = selected ? parseDossierField(selected.research, "CONTACT TYPE") : "";
@@ -692,6 +755,23 @@ function Drafts({ leads = [], loading = false, selectedId, setSelectedId, update
           <p className="eyebrow">{loading ? "Loading…" : `${leads.length} drafts pending review`}</p>
           <h1>Drafts</h1>
         </div>
+        {draftableCount > 0 && (
+          <button
+            className="btn-secondary"
+            style={{ marginLeft: "auto" }}
+            disabled={bulkRunning || loading}
+            onClick={runResearchAll}
+          >
+            {bulkRunning ? (
+              <>
+                <RefreshCw size={13} className="spin" style={{ marginRight: 5 }} />
+                Drafting {bulkProgress.done}/{bulkProgress.total}…
+              </>
+            ) : (
+              `Draft all (${draftableCount})`
+            )}
+          </button>
+        )}
       </div>
 
       <div className="draft-split">
@@ -772,7 +852,7 @@ function Drafts({ leads = [], loading = false, selectedId, setSelectedId, update
 
               {needsResearch ? (
                 <div className="draft-actions">
-                  <button className="btn-secondary" disabled={researching} onClick={runResearch}>
+                  <button className="btn-secondary" disabled={researching || bulkRunning} onClick={runResearch}>
                     {researching ? "Researching…" : "Research & draft"}
                   </button>
                 </div>
@@ -780,7 +860,7 @@ function Drafts({ leads = [], loading = false, selectedId, setSelectedId, update
                 <div className="draft-actions">
                   <button
                     className="btn-send"
-                    disabled={approving || approved || researching || explaining}
+                    disabled={approving || approved || researching || explaining || bulkRunning}
                     onClick={startApprove}
                   >
                     {approved
@@ -791,7 +871,7 @@ function Drafts({ leads = [], loading = false, selectedId, setSelectedId, update
                       ? "Saving…"
                       : "Approve & Send"}
                   </button>
-                  <button className="btn-secondary" disabled={researching} onClick={runResearch}>
+                  <button className="btn-secondary" disabled={researching || bulkRunning} onClick={runResearch}>
                     <RefreshCw
                       size={13}
                       className={researching ? "spin" : undefined}
@@ -937,9 +1017,10 @@ const KEY_FACT_LABELS = {
 /* ============================================================
    Qualify — paste leads, score-only ICP fit, optional CRM / draft
    ============================================================ */
-function Qualify({ onOpenDraft, onRefreshLeads }) {
-  const [input, setInput] = useState("");
-  const [rows, setRows] = useState([]);
+function Qualify({ onOpenDraft, onRefreshLeads, input, setInput, rows, setRows }) {
+  // `input` and `rows` are lifted into <Hub> (and persisted) so qualified leads
+  // survive navigating to another tab and back. `running`/`batchError` are
+  // transient per-mount UI state and stay local.
   const [running, setRunning] = useState(false);
   const [batchError, setBatchError] = useState(null);
 
@@ -1537,6 +1618,75 @@ export default function Hub() {
   });
   const [selectedDraftId, setSelectedDraftId] = useState(null);
 
+  // ---- Qualify screen state, lifted here so it survives tab switches ----
+  // The Qualify component unmounts when you leave its tab; keeping its pasted
+  // input and qualified rows here (and mirrored to localStorage) means the
+  // scored leads persist across navigation and page reloads.
+  const [qualifyInput, setQualifyInput] = useState(() => {
+    try {
+      return localStorage.getItem("agilow.qualify.input") || "";
+    } catch {
+      return "";
+    }
+  });
+  const [qualifyRows, setQualifyRows] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem("agilow.qualify.rows") || "[]");
+    } catch {
+      return [];
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("agilow.qualify.input", qualifyInput);
+    } catch {
+      /* storage unavailable (private mode / quota) — persistence is best-effort */
+    }
+  }, [qualifyInput]);
+  useEffect(() => {
+    try {
+      localStorage.setItem("agilow.qualify.rows", JSON.stringify(qualifyRows));
+    } catch {
+      /* storage unavailable or over quota — keep going with in-memory state */
+    }
+  }, [qualifyRows]);
+
+  // ---- Owner: who outreach is sent/signed as. Drives the drafting voice and
+  // the per-owner edit-learning. Persisted, and editable from the sidebar. ----
+  const [owner, setOwner] = useState(() => {
+    try {
+      return localStorage.getItem("agilow.owner") || "";
+    } catch {
+      return "";
+    }
+  });
+  const [ownerOptions, setOwnerOptions] = useState([]);
+  useEffect(() => {
+    try {
+      if (owner) localStorage.setItem("agilow.owner", owner);
+    } catch {
+      /* best-effort */
+    }
+  }, [owner]);
+  useEffect(() => {
+    let alive = true;
+    fetch(apiUrl("/api/owners"))
+      .then((r) => r.json())
+      .then((data) => {
+        if (!alive) return;
+        const list = Array.isArray(data?.owners) ? data.owners : [];
+        setOwnerOptions(list);
+        // Default the selection to the first known owner if none is saved.
+        setOwner((prev) => prev || list[0] || "");
+      })
+      .catch(() => {
+        /* selector falls back to whatever is saved / empty */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   // ---- Data layer: leads come from the Notion CRM via GET /api/leads ----
   const [leads, setLeads] = useState([]);
   const [leadsLoading, setLeadsLoading] = useState(true);
@@ -1596,7 +1746,14 @@ export default function Hub() {
     const pages = {
       overview: <Overview leads={leads} loading={leadsLoading} />,
       qualify: (
-        <Qualify onOpenDraft={openDraftForPage} onRefreshLeads={loadLeads} />
+        <Qualify
+          onOpenDraft={openDraftForPage}
+          onRefreshLeads={loadLeads}
+          input={qualifyInput}
+          setInput={setQualifyInput}
+          rows={qualifyRows}
+          setRows={setQualifyRows}
+        />
       ),
       queue: <LeadQueue leads={leads} loading={leadsLoading} error={leadsError} onDraft={openDraft} />,
       drafts: (
@@ -1606,6 +1763,7 @@ export default function Hub() {
           selectedId={selectedDraftId}
           setSelectedId={setSelectedDraftId}
           updateLead={updateLead}
+          owner={owner}
         />
       ),
       sent: <Sent />,
@@ -1613,11 +1771,17 @@ export default function Hub() {
       settings: <Settings />,
     };
     return pages[active] ?? pages.overview;
-  }, [active, selectedDraftId, leads, leadsLoading, leadsError]);
+  }, [active, selectedDraftId, leads, leadsLoading, leadsError, qualifyInput, qualifyRows, owner]);
 
   return (
     <>
-      <Shell active={active} setActive={setActive}>
+      <Shell
+        active={active}
+        setActive={setActive}
+        owner={owner}
+        setOwner={setOwner}
+        ownerOptions={ownerOptions}
+      >
         <AnimatePresence mode="wait">{page}</AnimatePresence>
       </Shell>
       {splash && <SplashScreen onDone={() => setSplash(false)} />}

@@ -679,9 +679,34 @@ app.get("/api/leads", async (_req, res) => {
   }
 });
 
-/* 2) POST /api/research { notionPageId } -> { draft, research } (+ writes Notion) */
+/* 1b) GET /api/owners — distinct owner names for the UI selector.
+   Pulls the Owner select column's options (so the picker matches the CRM),
+   plus any owner values already present on rows. Falls back to ["Shiv"]. */
+app.get("/api/owners", async (_req, res) => {
+  try {
+    if (!DATABASE_ID) throw new Error("NOTION_DATABASE_ID is not set");
+    const schema = await getDbSchema();
+    const ownerCol = resolveColName(schema, PROPS.owner);
+    const set = new Set();
+    const def = schema?.[ownerCol];
+    // Select / status / multi_select options defined on the column.
+    for (const o of def?.select?.options || []) if (o.name) set.add(o.name);
+    for (const o of def?.multi_select?.options || []) if (o.name) set.add(o.name);
+    const owners = Array.from(set);
+    if (owners.length === 0) owners.push("Shiv");
+    res.json({ owners });
+  } catch (err) {
+    console.error("GET /api/owners failed:", err?.message || err);
+    res.status(500).json({ error: err?.message || "Failed to load owners" });
+  }
+});
+
+/* 2) POST /api/research { notionPageId, owner? } -> { draft, research } (+ writes Notion)
+   `owner` (when set in the UI) overrides the page's Owner column: it controls
+   the signing voice, which owner's edit examples are learned from, AND is
+   written back to the Owner column so future edit-learning attributes correctly. */
 app.post("/api/research", async (req, res) => {
-  const { notionPageId } = req.body || {};
+  const { notionPageId, owner } = req.body || {};
   try {
     if (!notionPageId) throw new Error("notionPageId is required");
     const schema = await requireDraftColumn();
@@ -691,7 +716,8 @@ app.post("/api/research", async (req, res) => {
       "pages.retrieve"
     );
     const inputs = readResearchInputs(page, schema);
-    const ownerName = inputs.owner || "Shiv";
+    const selectedOwner = typeof owner === "string" ? owner.trim() : "";
+    const ownerName = selectedOwner || inputs.owner || "Shiv";
 
     const dossier = await researchDossier(inputs);
 
@@ -703,16 +729,14 @@ app.post("/api/research", async (req, res) => {
 
     // AI Draft = untouched original, Draft = editable working copy, Research = dossier.
     // AI Draft / Research write is skipped automatically if those columns are absent.
+    // Persist the chosen owner so the row reflects who this draft is from.
+    const entries = { draft, aiDraft: draft, research: dossier, status: "drafted" };
+    if (selectedOwner) entries.owner = selectedOwner;
     await withRetry(
       () =>
         getNotion().pages.update({
           page_id: notionPageId,
-          properties: writeProps(schema, {
-            draft,
-            aiDraft: draft,
-            research: dossier,
-            status: "drafted",
-          }),
+          properties: writeProps(schema, entries),
         }),
       "pages.update (research)"
     );
