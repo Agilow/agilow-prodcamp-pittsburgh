@@ -12,6 +12,7 @@ import {
   ChevronRight,
   RefreshCw,
   Target,
+  Mail,
 } from "lucide-react";
 import "./hub.css";
 import { apiUrl } from "./api.js";
@@ -594,7 +595,124 @@ function contactTypeClass(type) {
 /* ============================================================
    3) Drafts — split review screen
    ============================================================ */
-function Drafts({ leads = [], loading = false, selectedId, setSelectedId, updateLead, owner }) {
+/* Split a message into paragraph nodes for the preview. */
+function MessageParas({ text, emptyHint }) {
+  const paras = (text || "")
+    .split(/\n{2,}/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (paras.length === 0) return <p className="rp-empty">{emptyHint}</p>;
+  return paras.map((p, i) => <p key={i}>{p}</p>);
+}
+
+/* Recipient avatar: real photo when we have one, else colored initials. */
+function PhotoAvatar({ photoUrl, initials, color, size = 44 }) {
+  if (photoUrl) {
+    return (
+      <img
+        className="rp-photo"
+        src={photoUrl}
+        alt=""
+        style={{ width: size, height: size }}
+        onError={(e) => {
+          e.currentTarget.style.display = "none";
+        }}
+      />
+    );
+  }
+  return (
+    <span
+      className="rp-photo rp-photo-initials"
+      style={{ width: size, height: size, background: color }}
+    >
+      {initials}
+    </span>
+  );
+}
+
+/* "How it lands in their inbox" — a recipient-styled preview of the message.
+   LinkedIn/InMail render as a DM thread; email renders as a mail client. */
+function RecipientPreview({ lead, text, owner, photoUrl }) {
+  const ownerName = owner || "Shiv";
+  const ownerInitials = initialsFrom(ownerName, "Shiv");
+  const emptyHint = "No message yet — generate or write one to preview it.";
+
+  if (lead.channel === "email") {
+    const domain = (() => {
+      try {
+        return lead.companyUrl ? new URL(lead.companyUrl).hostname.replace(/^www\./, "") : "";
+      } catch {
+        return "";
+      }
+    })();
+    const toAddr = domain
+      ? `${(lead.contact || "there").split(/\s+/)[0].toLowerCase()}@${domain}`
+      : lead.contact || "recipient";
+    return (
+      <div className="rp-card rp-email">
+        <div className="rp-email-chrome">
+          <span className="rp-dots"><i /><i /><i /></span>
+          <span className="rp-email-chrome-subject">Outreach from {ownerName}</span>
+          <Mail size={13} style={{ marginLeft: "auto", opacity: 0.5 }} />
+        </div>
+        <div className="rp-email-meta">
+          <div><span>From</span> {ownerName}</div>
+          <div><span>To</span> {lead.contact || "Recipient"} &lt;{toAddr}&gt;</div>
+        </div>
+        <div className="rp-email-body">
+          <MessageParas text={text} emptyHint={emptyHint} />
+        </div>
+        <div className="rp-email-foot">Sent via Agilow</div>
+      </div>
+    );
+  }
+
+  // LinkedIn / InMail thread
+  const channelTag = lead.channel === "inmail" ? "InMail" : "LinkedIn";
+  return (
+    <div className="rp-card rp-linkedin">
+      <div className="rp-li-head">
+        <PhotoAvatar
+          photoUrl={photoUrl}
+          initials={lead.initials}
+          color={lead.color}
+          size={44}
+        />
+        <div className="rp-li-id">
+          <strong>{lead.contact || lead.company}</strong>
+          <small>{lead.role || lead.company}</small>
+        </div>
+        <span className="rp-li-badge">in</span>
+      </div>
+      <div className="rp-li-thread">
+        <div className="rp-li-day">{channelTag} · Today</div>
+        <div className="rp-li-msg">
+          <Avatar initials={ownerInitials} color={palette[0]} size="sm" />
+          <div className="rp-li-bubble-wrap">
+            <div className="rp-li-byline">
+              <strong>{ownerName}</strong>
+              <span>now</span>
+            </div>
+            <div className="rp-li-bubble">
+              <MessageParas text={text} emptyHint={emptyHint} />
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Drafts({
+  leads = [],
+  loading = false,
+  selectedId,
+  setSelectedId,
+  updateLead,
+  owner,
+  autoDraftIds,
+  onAutoDraftDone,
+}) {
   const selected = leads.find((l) => l.id === selectedId) ?? leads[0] ?? null;
 
   const [text, setText] = useState(selected?.draft ?? "");
@@ -608,6 +726,9 @@ function Drafts({ leads = [], loading = false, selectedId, setSelectedId, update
   const [showReasonPanel, setShowReasonPanel] = useState(false);
   const [reasonText, setReasonText] = useState("");
 
+  // Best-effort recipient photo for the preview (LinkedIn usually fails -> null).
+  const [photoUrl, setPhotoUrl] = useState(null);
+
   // Reset the textarea (and clear transient errors) when switching leads.
   // Approve & Send persists first, so switching no longer loses saved edits.
   useEffect(() => {
@@ -618,6 +739,26 @@ function Drafts({ leads = [], loading = false, selectedId, setSelectedId, update
     setShowReasonPanel(false);
     setReasonText("");
   }, [selected?.id]);
+
+  // Fetch the recipient's photo when the selection changes; null on any miss.
+  useEffect(() => {
+    setPhotoUrl(null);
+    if (!selected?.linkedin) return;
+    let alive = true;
+    fetch(apiUrl("/api/photo"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ linkedinUrl: selected.linkedin }),
+    })
+      .then((r) => r.json())
+      .then((d) => {
+        if (alive) setPhotoUrl(d?.photoUrl || null);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [selected?.id, selected?.linkedin]);
 
   // Bulk "Draft all" queue state — drafts every lead that has no draft yet,
   // one at a time (research is heavy: ~7 web-search calls per lead), mirroring
@@ -661,13 +802,11 @@ function Drafts({ leads = [], loading = false, selectedId, setSelectedId, update
     }
   }
 
-  // Draft every lead that has no draft yet (skips approved/already-drafted),
-  // sequentially so we don't hammer the research API. Per-lead failures are
-  // skipped (status reset to "new") so one bad lead doesn't stop the run.
-  async function runResearchAll() {
-    if (bulkRunning) return;
-    const targets = leads.filter((l) => !l.draft && l.status !== "approved");
-    if (targets.length === 0) return;
+  // Draft a set of leads sequentially (research is heavy: ~7 web-search calls
+  // each), so we don't hammer the API. Per-lead failures are skipped (status
+  // reset to "new") so one bad lead doesn't stop the run.
+  async function runBulk(targets) {
+    if (bulkRunning || !targets || targets.length === 0) return;
     setBulkRunning(true);
     setResearchError(null);
     setBulkProgress({ done: 0, total: targets.length });
@@ -683,6 +822,31 @@ function Drafts({ leads = [], loading = false, selectedId, setSelectedId, update
     }
     setBulkRunning(false);
   }
+
+  // "Draft all" on this screen: every lead with no draft yet.
+  function runResearchAll() {
+    return runBulk(leads.filter((l) => !l.draft && l.status !== "approved"));
+  }
+
+  // Auto-generate when arriving from Qualify "Draft all": draft exactly the
+  // leads whose page ids were handed over, once, then clear the trigger.
+  const autoRanRef = useRef(false);
+  useEffect(() => {
+    if (!autoDraftIds || autoDraftIds.length === 0) {
+      autoRanRef.current = false;
+      return;
+    }
+    if (autoRanRef.current || bulkRunning || loading) return;
+    autoRanRef.current = true;
+    const targets = leads.filter(
+      (l) => autoDraftIds.includes(l.notionPageId) && !l.draft && l.status !== "approved"
+    );
+    (async () => {
+      if (targets.length) await runBulk(targets);
+      onAutoDraftDone && onAutoDraftDone();
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoDraftIds, loading]);
 
   // "Approve & Send": if the human meaningfully edited the AI original, ask the
   // AI to propose a reason and surface the confirm panel first; otherwise approve
@@ -829,6 +993,8 @@ function Drafts({ leads = [], loading = false, selectedId, setSelectedId, update
                 </div>
               )}
 
+              <div className="draft-compose">
+                <div className="compose-editor">
               <div className="field-label">
                 <span>Message</span>
                 <span style={{ textTransform: "none", letterSpacing: 0, fontWeight: 500, color: "var(--quiet)" }}>
@@ -966,6 +1132,26 @@ function Drafts({ leads = [], loading = false, selectedId, setSelectedId, update
                   {showResearch && <div className="research-body">{selected.research}</div>}
                 </div>
               )}
+                </div>
+
+                <div className="compose-preview">
+                  <div className="field-label">
+                    <span>Recipient preview</span>
+                    <span
+                      className={cx("chip", selected.channel)}
+                      style={{ textTransform: "none", letterSpacing: 0 }}
+                    >
+                      {channelLabel[selected.channel]}
+                    </span>
+                  </div>
+                  <RecipientPreview
+                    lead={selected}
+                    text={text}
+                    owner={owner}
+                    photoUrl={photoUrl}
+                  />
+                </div>
+              </div>
             </div>
           </div>
         )}
@@ -1017,22 +1203,55 @@ const KEY_FACT_LABELS = {
 /* ============================================================
    Qualify — paste leads, score-only ICP fit, optional CRM / draft
    ============================================================ */
-function Qualify({ onOpenDraft, onRefreshLeads, input, setInput, rows, setRows }) {
+function Qualify({ onOpenDraft, onRefreshLeads, onDraftAll, input, setInput, rows, setRows }) {
   // `input` and `rows` are lifted into <Hub> (and persisted) so qualified leads
   // survive navigating to another tab and back. `running`/`batchError` are
   // transient per-mount UI state and stay local.
   const [running, setRunning] = useState(false);
+  const [parsing, setParsing] = useState(false);
+  const [draftingAll, setDraftingAll] = useState(false);
   const [batchError, setBatchError] = useState(null);
 
   const patchRow = (id, patch) =>
     setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...patch } : r)));
 
+  // Smart-parse the pasted text via the LLM so URLs land in the right field;
+  // fall back to naive comma-splitting if the API call fails.
+  async function parseInput() {
+    try {
+      const res = await fetch(apiUrl("/api/parse-leads"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: input }),
+      });
+      const data = await res.json();
+      if (res.ok && Array.isArray(data.leads) && data.leads.length) {
+        return data.leads.map((l, i) => ({
+          id: `q-${i}-${(l.name || "").slice(0, 12)}-${(l.company || "").slice(0, 12)}`,
+          name: l.name || "",
+          company: l.company || "",
+          linkedinUrl: l.linkedinUrl || "",
+          companyUrl: l.companyUrl || "",
+        }));
+      }
+    } catch {
+      /* fall through to naive parser */
+    }
+    return parseLeadLines(input);
+  }
+
   async function runQualify() {
-    const leads = parseLeadLines(input);
-    if (leads.length === 0) return;
+    if (!input.trim()) return;
 
     setBatchError(null);
     setRunning(true);
+    setParsing(true);
+    const leads = await parseInput();
+    setParsing(false);
+    if (leads.length === 0) {
+      setRunning(false);
+      return;
+    }
     setRows(
       leads.map((l) => ({
         ...l,
@@ -1059,6 +1278,7 @@ function Qualify({ onOpenDraft, onRefreshLeads, input, setInput, rows, setRows }
             name: lead.name,
             company: lead.company,
             linkedinUrl: lead.linkedinUrl || undefined,
+            companyUrl: lead.companyUrl || undefined,
           }),
         });
         const data = await res.json();
@@ -1082,6 +1302,7 @@ function Qualify({ onOpenDraft, onRefreshLeads, input, setInput, rows, setRows }
           name: row.name,
           company: row.company,
           linkedinUrl: row.linkedinUrl || undefined,
+          companyUrl: row.companyUrl || undefined,
           verdict: row.result?.verdict,
           dossier: row.result?.dossier,
         }),
@@ -1127,6 +1348,25 @@ function Qualify({ onOpenDraft, onRefreshLeads, input, setInput, rows, setRows }
     }
   }
 
+  // Draft for EVERY scored lead on this screen: add each to the CRM, then jump
+  // to the Drafts window and auto-generate all of them there.
+  const doneRows = rows.filter((r) => r.status === "done");
+  async function draftAll() {
+    if (draftingAll || doneRows.length === 0) return;
+    setDraftingAll(true);
+    const pageIds = [];
+    for (const row of doneRows) {
+      try {
+        const pid = row.notionPageId || (await addToCrm(row));
+        if (pid) pageIds.push(pid);
+      } catch {
+        /* per-row crmMessage already surfaced; keep going */
+      }
+    }
+    setDraftingAll(false);
+    if (pageIds.length && onDraftAll) onDraftAll(pageIds);
+  }
+
   const sortedRows = useMemo(
     () =>
       [...rows].sort((a, b) => {
@@ -1149,9 +1389,28 @@ function Qualify({ onOpenDraft, onRefreshLeads, input, setInput, rows, setRows }
             <h1>Qualify</h1>
           </div>
           {rows.length > 0 && (
-            <span className="pill queue-count" style={{ height: 22, fontSize: 12 }}>
-              {running ? `${doneCount} / ${rows.length}` : `${rows.filter((r) => r.status === "done").length} scored`}
-            </span>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginLeft: "auto" }}>
+              <span className="pill queue-count" style={{ height: 22, fontSize: 12 }}>
+                {running ? `${doneCount} / ${rows.length}` : `${rows.filter((r) => r.status === "done").length} scored`}
+              </span>
+              {doneRows.length > 0 && (
+                <button
+                  className="btn-send"
+                  style={{ height: 30 }}
+                  disabled={draftingAll || running}
+                  onClick={draftAll}
+                >
+                  {draftingAll ? (
+                    <>
+                      <RefreshCw size={13} className="spin" style={{ marginRight: 5 }} />
+                      Preparing…
+                    </>
+                  ) : (
+                    `Draft all (${doneRows.length})`
+                  )}
+                </button>
+              )}
+            </div>
           )}
         </div>
 
@@ -1159,12 +1418,12 @@ function Qualify({ onOpenDraft, onRefreshLeads, input, setInput, rows, setRows }
           <div className="panel-title">
             <div>
               <h2>Paste leads</h2>
-              <p>One per line — Name, Company or Name, Company, LinkedIn URL.</p>
+              <p>Anything goes — names, companies, or LinkedIn / website URLs. AI sorts it out.</p>
             </div>
           </div>
           <textarea
             className="qualify-textarea"
-            placeholder={"Banks Hunter, Charge Robotics\nJeffrey Martin, Near Earth Autonomy\nEyal Cohen, Humble Robotics"}
+            placeholder={"Banks Hunter, Charge Robotics\nhttps://www.linkedin.com/in/jeffrey-martin\nEyal Cohen — Humble Robotics — humble.inc"}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             disabled={running}
@@ -1175,7 +1434,12 @@ function Qualify({ onOpenDraft, onRefreshLeads, input, setInput, rows, setRows }
               disabled={running || !input.trim()}
               onClick={runQualify}
             >
-              {running ? (
+              {parsing ? (
+                <>
+                  <RefreshCw size={13} className="spin" style={{ marginRight: 5 }} />
+                  Formatting…
+                </>
+              ) : running ? (
                 <>
                   <RefreshCw size={13} className="spin" style={{ marginRight: 5 }} />
                   Qualifying…
@@ -1742,6 +2006,21 @@ export default function Hub() {
     }
   }
 
+  // Qualify "Draft all": leads were just added to the CRM; refresh, open Drafts
+  // on the first one, and hand the page ids to Drafts to auto-generate them all.
+  const [autoDraftIds, setAutoDraftIds] = useState(null);
+  async function draftAllForPages(notionPageIds) {
+    setActive("drafts");
+    try {
+      const list = await loadLeads();
+      const first = list.find((l) => notionPageIds.includes(l.notionPageId));
+      if (first) setSelectedDraftId(first.id);
+      setAutoDraftIds(notionPageIds);
+    } catch {
+      /* leads error surfaces on the Drafts screen */
+    }
+  }
+
   const page = useMemo(() => {
     const pages = {
       overview: <Overview leads={leads} loading={leadsLoading} />,
@@ -1749,6 +2028,7 @@ export default function Hub() {
         <Qualify
           onOpenDraft={openDraftForPage}
           onRefreshLeads={loadLeads}
+          onDraftAll={draftAllForPages}
           input={qualifyInput}
           setInput={setQualifyInput}
           rows={qualifyRows}
@@ -1764,6 +2044,8 @@ export default function Hub() {
           setSelectedId={setSelectedDraftId}
           updateLead={updateLead}
           owner={owner}
+          autoDraftIds={autoDraftIds}
+          onAutoDraftDone={() => setAutoDraftIds(null)}
         />
       ),
       sent: <Sent />,
@@ -1771,7 +2053,7 @@ export default function Hub() {
       settings: <Settings />,
     };
     return pages[active] ?? pages.overview;
-  }, [active, selectedDraftId, leads, leadsLoading, leadsError, qualifyInput, qualifyRows, owner]);
+  }, [active, selectedDraftId, leads, leadsLoading, leadsError, qualifyInput, qualifyRows, owner, autoDraftIds]);
 
   return (
     <>

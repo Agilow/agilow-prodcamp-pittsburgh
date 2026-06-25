@@ -433,6 +433,8 @@ function mapLead(page, index, schema) {
     draft: readProp(props, P.draft) || "",
     aiDraft: readProp(props, P.aiDraft) || "", // AI original, for edit-diff detection
     research: readProp(props, P.research) || "", // dossier shown in the UI disclosure
+    linkedin: readProp(props, P.linkedin) || "", // used for best-effort preview photo
+    companyUrl: readProp(props, P.companyUrl) || "",
     channel: normChannel(readProp(props, P.channel)),
     icp: normIcp(readProp(props, P.icp)),
     status: normStatus(readProp(props, P.status)),
@@ -1090,7 +1092,7 @@ function fitFromVerdict(verdict) {
 }
 
 app.post("/api/add-to-crm", async (req, res) => {
-  const { name, company, linkedinUrl, verdict, dossier } = req.body || {};
+  const { name, company, linkedinUrl, companyUrl, verdict, dossier } = req.body || {};
   try {
     if (!name && !company) throw new Error("name or company is required");
     const schema = await getDbSchema();
@@ -1109,6 +1111,7 @@ app.post("/api/add-to-crm", async (req, res) => {
     if (fit) entries.icp = fit;
     if (dossier) entries.research = dossier;
     if (linkedinUrl) entries.linkedin = linkedinUrl;
+    if (companyUrl) entries.companyUrl = companyUrl;
 
     const properties = writeProps(schema, entries);
 
@@ -1130,6 +1133,100 @@ app.post("/api/add-to-crm", async (req, res) => {
   } catch (err) {
     console.error("POST /api/add-to-crm failed:", err?.message || err);
     res.status(500).json({ error: err?.message || "Add to CRM failed" });
+  }
+});
+
+/* 6) POST /api/parse-leads { text } -> { leads: [{name, company, linkedinUrl, companyUrl}] }
+   LLM-cleans messy pasted input: routes URLs to the right field (so a LinkedIn
+   link never lands in the company name), extracts names/companies, and derives
+   a name from a profile slug when no name is given. */
+app.post("/api/parse-leads", async (req, res) => {
+  const { text } = req.body || {};
+  try {
+    if (typeof text !== "string" || !text.trim()) throw new Error("text is required");
+    const resp = await withRetry(
+      () =>
+        getOpenAI().responses.create({
+          model: OPENAI_MODEL,
+          temperature: 0,
+          input: [
+            {
+              role: "system",
+              content:
+                "You clean up a pasted list of sales leads into structured rows. The input is messy: " +
+                "each lead may be on one line as 'Name, Company', or may include a LinkedIn profile URL " +
+                "(linkedin.com/in/...) and/or a company website URL anywhere in the line. " +
+                "RULES: Put the person's full name in `name`, the company in `company`, a LinkedIn profile " +
+                "URL in `linkedinUrl`, and a company website URL in `companyUrl`. NEVER put a URL in `name` " +
+                "or `company`. If a line is only a LinkedIn URL with no name, derive a plausible human name " +
+                "from the profile slug (e.g. /in/jane-doe-123 -> 'Jane Doe'); leave company empty if unknown. " +
+                "If a value is genuinely unknown, use an empty string. Return one row per distinct lead.",
+            },
+            { role: "user", content: `Parse these leads:\n\n${text.slice(0, 8000)}` },
+          ],
+          text: {
+            format: {
+              type: "json_schema",
+              name: "parsed_leads",
+              strict: true,
+              schema: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  leads: {
+                    type: "array",
+                    items: {
+                      type: "object",
+                      additionalProperties: false,
+                      properties: {
+                        name: { type: "string" },
+                        company: { type: "string" },
+                        linkedinUrl: { type: "string" },
+                        companyUrl: { type: "string" },
+                      },
+                      required: ["name", "company", "linkedinUrl", "companyUrl"],
+                    },
+                  },
+                },
+                required: ["leads"],
+              },
+            },
+          },
+        }),
+      "openai.parse-leads"
+    );
+    const parsed = JSON.parse((resp.output_text || "{}").trim());
+    res.json({ leads: Array.isArray(parsed.leads) ? parsed.leads : [] });
+  } catch (err) {
+    console.error("POST /api/parse-leads failed:", err?.message || err);
+    res.status(500).json({ error: err?.message || "Parse failed" });
+  }
+});
+
+/* 7) POST /api/photo { linkedinUrl } -> { photoUrl }
+   Best-effort recipient photo for the preview. Tries to read the page's
+   og:image via Firecrawl. LinkedIn usually serves a login wall, so this often
+   returns null — the UI falls back to an initials avatar. Never throws. */
+app.post("/api/photo", async (req, res) => {
+  const { linkedinUrl } = req.body || {};
+  try {
+    if (!FIRECRAWL_API_KEY || !linkedinUrl || !/^https?:\/\//i.test(linkedinUrl)) {
+      return res.json({ photoUrl: null });
+    }
+    const data = await firecrawlPost(
+      "/scrape",
+      { url: linkedinUrl, formats: ["markdown"], onlyMainContent: false, waitFor: 2000 },
+      30000
+    );
+    const meta = data?.data?.metadata || {};
+    let photo = meta.ogImage || meta["og:image"] || meta.image || null;
+    if (Array.isArray(photo)) photo = photo[0] || null;
+    // Only accept a real profile-media image; skip generic logos/login walls.
+    const ok = typeof photo === "string" && /licdn\.com|cdn|profile|media/i.test(photo);
+    res.json({ photoUrl: ok ? photo : null });
+  } catch (err) {
+    console.warn("POST /api/photo failed (returning null):", err?.message || err);
+    res.json({ photoUrl: null });
   }
 });
 
