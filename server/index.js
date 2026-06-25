@@ -243,6 +243,139 @@ function writeProps(schema, entries) {
 }
 
 /* ============================================================
+   Dossier -> Notion page BODY (block content, below Comments).
+   The whole dossier lives inside ONE collapsible toggle titled
+   "Agilow Research Dossier", so re-running research can replace it
+   with a single delete (which removes all nested blocks) without
+   disturbing anything else the user put on the page.
+   ============================================================ */
+const DOSSIER_TITLE_PREFIX = "Agilow Research Dossier";
+const URL_RE = /(https?:\/\/[^\s)]+)/g;
+
+/* Build a Notion rich_text array from a line: linkifies URLs, optionally
+   bolds a leading "Label:" prefix, and chunks at Notion's 2000-char limit. */
+function richTextSegments(text, { boldPrefix = false } = {}) {
+  const out = [];
+  let s = String(text ?? "");
+  let prefix = null;
+  if (boldPrefix) {
+    const m = s.match(/^([^:]{1,60}:)\s*([\s\S]*)$/);
+    if (m) {
+      prefix = m[1];
+      s = m[2];
+    }
+  }
+  const push = (content, { bold = false, link = null } = {}) => {
+    for (let i = 0; i < content.length; i += 2000) {
+      out.push({
+        type: "text",
+        text: { content: content.slice(i, i + 2000), link: link ? { url: link } : null },
+        annotations: bold ? { bold: true } : undefined,
+      });
+    }
+  };
+  if (prefix) push(prefix + " ", { bold: true });
+  let last = 0;
+  let mm;
+  URL_RE.lastIndex = 0;
+  while ((mm = URL_RE.exec(s))) {
+    if (mm.index > last) push(s.slice(last, mm.index));
+    const url = mm[0].replace(/[.,);]+$/, ""); // trim trailing punctuation
+    push(url, { link: url });
+    last = mm.index + mm[0].length;
+  }
+  if (last < s.length) push(s.slice(last));
+  if (out.length === 0) push(s);
+  return out.slice(0, 100); // Notion caps rich_text at 100 items per block
+}
+
+/* Convert the dossier text into Notion blocks: section headers (lines ending
+   in ":") -> heading_3, "- "/"A." lines -> bullets, everything else ->
+   paragraphs with a bold "Label:" lead-in. */
+function dossierToBlocks(dossier) {
+  const blocks = [];
+  for (const raw of String(dossier || "").split("\n")) {
+    const line = raw.replace(/\s+$/, "");
+    const t = line.trim();
+    if (!t) continue; // collapse blank lines
+    if (t.endsWith(":") && t.length <= 60 && !/https?:/i.test(t)) {
+      blocks.push({
+        object: "block",
+        type: "heading_3",
+        heading_3: { rich_text: richTextSegments(t.replace(/:$/, "")) },
+      });
+    } else if (/^[-*•]\s+/.test(t)) {
+      blocks.push({
+        object: "block",
+        type: "bulleted_list_item",
+        bulleted_list_item: { rich_text: richTextSegments(t.replace(/^[-*•]\s+/, ""), { boldPrefix: true }) },
+      });
+    } else if (/^[A-E]\.\s+/.test(t)) {
+      blocks.push({
+        object: "block",
+        type: "bulleted_list_item",
+        bulleted_list_item: { rich_text: richTextSegments(t, { boldPrefix: true }) },
+      });
+    } else {
+      blocks.push({
+        object: "block",
+        type: "paragraph",
+        paragraph: { rich_text: richTextSegments(t, { boldPrefix: true }) },
+      });
+    }
+  }
+  return blocks.slice(0, 2000);
+}
+
+/* Replace any prior dossier toggle on the page with a fresh one. Best-effort:
+   callers wrap this so a body-write failure never fails the main request. */
+async function writeDossierToBody(pageId, dossier) {
+  if (!dossier || !dossier.trim()) return;
+
+  // 1) Delete (archive) any existing "Agilow Research Dossier" toggle(s).
+  const existing = await withRetry(
+    () => getNotion().blocks.children.list({ block_id: pageId, page_size: 100 }),
+    "blocks.children.list (dossier)"
+  );
+  for (const b of existing.results || []) {
+    if (b.type !== "toggle") continue;
+    const txt = (b.toggle?.rich_text || []).map((r) => r.plain_text || "").join("");
+    if (txt.startsWith(DOSSIER_TITLE_PREFIX)) {
+      await withRetry(() => getNotion().blocks.delete({ block_id: b.id }), "blocks.delete (old dossier)");
+    }
+  }
+
+  // 2) Create a fresh, empty toggle to hold the dossier.
+  const today = new Date().toISOString().slice(0, 10);
+  const created = await withRetry(
+    () =>
+      getNotion().blocks.children.append({
+        block_id: pageId,
+        children: [
+          {
+            object: "block",
+            type: "toggle",
+            toggle: { rich_text: richTextSegments(`${DOSSIER_TITLE_PREFIX} · updated ${today}`) },
+          },
+        ],
+      }),
+    "blocks.children.append (dossier toggle)"
+  );
+  const toggleId = created.results?.[0]?.id;
+  if (!toggleId) return;
+
+  // 3) Append the dossier blocks INTO the toggle, in batches (100-block limit).
+  const blocks = dossierToBlocks(dossier);
+  for (let i = 0; i < blocks.length; i += 90) {
+    const chunk = blocks.slice(i, i + 90);
+    await withRetry(
+      () => getNotion().blocks.children.append({ block_id: toggleId, children: chunk }),
+      "blocks.children.append (dossier body)"
+    );
+  }
+}
+
+/* ============================================================
    Normalizers
    ============================================================ */
 function normChannel(raw) {
@@ -741,6 +874,14 @@ app.post("/api/research", async (req, res) => {
       "pages.update (research)"
     );
 
+    // Write the dossier into the page BODY (collapsible toggle), replacing any
+    // previous one. Best-effort: never fail the draft if the body write hiccups.
+    try {
+      await writeDossierToBody(notionPageId, dossier);
+    } catch (e) {
+      console.warn("dossier body write failed (continuing):", e?.message || e);
+    }
+
     res.json({ draft, research: dossier });
   } catch (err) {
     console.error("POST /api/research failed:", err?.message || err);
@@ -884,6 +1025,15 @@ app.post("/api/add-to-crm", async (req, res) => {
       () => getNotion().pages.create({ parent: { database_id: DATABASE_ID }, properties }),
       "pages.create"
     );
+
+    // If a dossier was passed (from Qualify), write it into the new page's body.
+    if (dossier) {
+      try {
+        await writeDossierToBody(page.id, dossier);
+      } catch (e) {
+        console.warn("dossier body write failed (continuing):", e?.message || e);
+      }
+    }
 
     res.json({ ok: true, notionPageId: page.id });
   } catch (err) {
