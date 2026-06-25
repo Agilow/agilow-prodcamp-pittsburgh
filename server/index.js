@@ -47,6 +47,8 @@ async function withRetry(fn, label, attempts = 3) {
 const PORT = process.env.PORT || 8787;
 const DATABASE_ID = process.env.NOTION_DATABASE_ID;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1";
+const FIRECRAWL_API_KEY = process.env.FIRECRAWL_API_KEY;
+const FIRECRAWL_BASE = "https://api.firecrawl.dev/v2";
 
 // Lazy clients — construct on first use so the server boots even when keys
 // are unset, and each endpoint returns a clear error instead of crashing.
@@ -582,12 +584,101 @@ async function runSearchPass(systemPrompt, label) {
   );
 }
 
+/* ============================================================
+   Firecrawl: render JS-heavy pages (e.g. careers pages whose job
+   boards load client-side) so the hiring pass can actually see them.
+   All best-effort — any failure or missing key yields "".
+   ============================================================ */
+async function firecrawlPost(path, body, ms = 60000) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const r = await fetch(`${FIRECRAWL_BASE}${path}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${FIRECRAWL_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+      signal: ctrl.signal,
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok || data.success === false) {
+      throw new Error(data?.error || `Firecrawl ${path} HTTP ${r.status}`);
+    }
+    return data;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/* Normalize the various shapes Firecrawl /search can return into a flat list. */
+function firecrawlResults(data) {
+  const d = data?.data;
+  if (Array.isArray(d)) return d;
+  if (d && Array.isArray(d.web)) return d.web;
+  return [];
+}
+
+const urlHost = (u) => {
+  try {
+    return new URL(u).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+};
+
+/* Discover the company's careers/jobs page, then scrape it WITH JavaScript
+   rendered (onlyMainContent:false + waitFor, since job boards often live
+   outside "main" and load via AJAX). Returns sourced markdown or "". */
+async function fetchCareersContent(company, companyUrl) {
+  if (!FIRECRAWL_API_KEY || !company) return "";
+  try {
+    const search = await firecrawlPost("/search", {
+      query: `${company} careers jobs open positions`,
+      limit: 6,
+    });
+    const results = firecrawlResults(search)
+      .map((r) => r.url)
+      .filter(Boolean);
+    if (results.length === 0) return "";
+
+    // Prefer a URL on the company's own domain, then anything careers-shaped.
+    const companyHost = companyUrl ? urlHost(companyUrl) : "";
+    const score = (u) => {
+      let s = 0;
+      if (companyHost && urlHost(u) === companyHost) s += 3;
+      if (/career|job|join|position/i.test(u)) s += 2;
+      return s;
+    };
+    const best = [...results].sort((a, b) => score(b) - score(a))[0];
+    if (!best || score(best) === 0) return ""; // nothing careers-like found
+
+    const scrape = await firecrawlPost("/scrape", {
+      url: best,
+      formats: ["markdown"],
+      onlyMainContent: false,
+      waitFor: 5000,
+    });
+    const md = (scrape?.data?.markdown || "").trim();
+    if (!md) return "";
+    const clipped = md.length > 8000 ? md.slice(0, 8000) + "\n…(truncated)" : md;
+    return `SOURCE: ${best}\n\n${clipped}`;
+  } catch (e) {
+    console.warn("fetchCareersContent failed (continuing):", e?.message || e);
+    return "";
+  }
+}
+
 /* Multi-step research: six targeted, source-tiered passes gathered in
    parallel, then a verification + reconciliation + ICP-gate synthesis pass.
    Returns the final dossier string (consumed by the drafting step). */
 async function researchDossier(inputs) {
   const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
-  const ctx = { ...inputs, today };
+  // Firecrawl: rendered careers page so the hiring pass sees client-side
+  // job boards search engines miss. Best-effort; "" when unavailable.
+  const careersContent = await fetchCareersContent(inputs.company, inputs.companyUrl);
+  const ctx = { ...inputs, today, careersContent };
 
   const passes = [
     ["company", RESEARCH_COMPANY],

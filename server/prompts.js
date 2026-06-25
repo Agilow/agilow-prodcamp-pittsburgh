@@ -184,6 +184,10 @@ RULES:
 - Search the careers page and job boards (Ashby, Greenhouse, Lever, Workable, www.linkedin.com/jobs, simplify.jobs).
 - Specifically look for any Project/Program Manager / Technical Program Manager / delivery / ops role, and any burst of engineering hiring.
 - Quote role titles and posting dates. Date everything against {{TODAY}}.
+- A RENDERED CAREERS PAGE block may be provided below. It was captured with a JavaScript-rendering scrape of the company's OWN careers/jobs page, so it shows live openings that ordinary search engines often cannot see. When it lists real roles, treat them as AUTHORITATIVE and [VERIFIED], cite the SOURCE url shown in the block, and DO NOT report "Not found" for roles that clearly appear there. If it says "(none captured)" or is empty, rely on web search instead.
+
+RENDERED CAREERS PAGE (JS-rendered scrape; may be empty):
+{{CAREERS_CONTENT}}
 
 OUTPUT (exactly):
 HIRING: <yes | no | unknown>
@@ -317,6 +321,7 @@ export function fillPrompt(template, vars = {}) {
     TODAY: vars.today || "",
     NOTES_BLOCK: vars.notesBlock || "(none provided)",
     RAW_RESEARCH: vars.rawResearch || "",
+    CAREERS_CONTENT: vars.careersContent || "(none captured)",
   };
   let out = template;
   for (const [k, v] of Object.entries(map)) out = out.replaceAll(`{{${k}}}`, v);

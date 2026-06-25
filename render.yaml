@@ -18,6 +18,9 @@ services:
         sync: false
       - key: NOTION_DATABASE_ID
         sync: false
+      # Optional: enables JS-rendered careers-page scraping for hiring signals.
+      - key: FIRECRAWL_API_KEY
+        sync: false
       - key: OPENAI_MODEL
         value: gpt-4.1
       # Lock CORS to your Vercel URL(s) once known, comma-separated, e.g.
