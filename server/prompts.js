@@ -134,6 +134,7 @@ worth 15 min?
    - Do NOT use any fact the dossier tags [LOW-CONFIDENCE] or [UNVERIFIED]; treat those as if they are not present.
    - Do NOT describe anything as "recent" or "just" or "this week" unless the dossier dated that item within the last 60 days.
    - Reference at most ONE or TWO concrete verified facts. More reads as research-stalking, not warmth.
+   - If the very first line of the dossier starts with "⚠️ LIKELY BAD LEAD", do NOT write a normal outreach message. In that case, return exactly one line: "Skipped: could not verify this person works at this company. Fix the lead first." and nothing else.
 
    === AIM THE MESSAGE AT THE INTENT (this controls WHAT you ask for) ===
    The dossier contains a SUGGESTED INTENT line and a CONTACT TYPE. The message MUST be aimed at that intent:
@@ -272,7 +273,8 @@ RULES:
 OUTPUT (exactly):
 PERSON BACKGROUND: <prior roles & companies> [VERIFIED|LOW-CONFIDENCE] | source: <url>
 PM/SCRUM EXPOSURE: <likely yes/no + why>
-IC vs LEADER: <which, + evidence>`;
+IC vs LEADER: <which, + evidence>
+PERSON-COMPANY MATCH: <CONFIRMED | NOT CONFIRMED | CONTRADICTED> — <evidence>`;
 
 export const RESEARCH_RECENT = `You are a research analyst with live web search. Find the MOST RECENT public item about {{COMPANY}} or {{LEAD_NAME}}. Today is {{TODAY}}.
 
@@ -292,31 +294,29 @@ You are given RAW RESEARCH from several targeted passes (each with sources) and 
 
 === AGILOW ICP ===
 Early-stage robotics/autonomy company; ~6-50 people; raised seed or Series A within ~18 months; transitioning into its FIRST real pilot/deployment; likely no dedicated/established PM function; led by a technical founder/CTO.
-
-=== INPUTS ===
-HUMAN INTERNAL NOTES (these are CLAIMS TO VERIFY, NOT facts):
-{{NOTES_BLOCK}}
-
-RAW RESEARCH (from the targeted passes):
-{{RAW_RESEARCH}}
-
-=== RULES ===
-1. SOURCE CONFIDENCE — tag EVERY key fact line with exactly one tag:
-   [VERIFIED] = backed by an AUTHORITATIVE source: the company's own website / careers page, Crunchbase, PitchBook, TechCrunch, PRNewswire / BusinessWire, an official press release, major or trade press (Reuters, Bloomberg, Forbes, Fortune, IEEE Spectrum, The Robot Report, pv-magazine, etc.), or the company's official www.linkedin.com page (for headcount/role only).
-   [LOW-CONFIDENCE] = the ONLY support is an aggregator or a single weak source. Aggregators include: ${AGGREGATORS}, plus cbinsights.com, seedtable.com, rocketreach.co, leadiq.com, apollo.io. A fact whose only source is one of these is LOW-CONFIDENCE — NEVER [VERIFIED], no matter how plausible it looks. (Example of the error to avoid: a funding figure sourced only to thecompanycheck.com must be [LOW-CONFIDENCE], not [VERIFIED].)
-   [UNVERIFIED] = human note only, an undated page, a locale LinkedIn mirror, or a single non-authoritative source.
-2. RECONCILE NOTES vs WEB — the human notes are claims. If a note conflicts with web findings, report the WEB-VERIFIED figure and FLAG the conflict. Never present both as true. Never repeat a note as fact unless web-verified; if only the human asserts it, label it "per internal notes, unverified" and tag [UNVERIFIED].
-3. RECENCY — never call anything "recent" unless dated within 60 days of {{TODAY}}; always show the date.
-4. NO ESTIMATES — never invent funding, headcount, or dates.
-5. REAL SOURCES ONLY — every factual line MUST cite a real, resolvable URL or a specifically named publication with a date (e.g. "TechCrunch, 2025-03-17"). NEVER output an internal search-reference token such as "turn0search7", "turn1search3", a "【...】" bracket, or any "turnXsearchN" placeholder. If your only handle on a fact is such an internal reference and you cannot provide a real URL or named source, you MUST downgrade that fact to [UNVERIFIED] (or drop it). No "turnXsearchN" tokens may appear anywhere in the final dossier.
-
-=== ICP FIT — HARD GATE (mechanical; evaluate booleans on VERIFIED facts only) ===
-The ICP is an EARLY-STAGE robotics/autonomy company transitioning from prototype/R&D INTO or THROUGH its first real deployments and SCALING them. A company that has shipped a first deployment and is now scaling it is INSIDE the ICP — that is the sweet spot, not a disqualifier.
-For each criterion output true / false / unknown WITH the evidence:
-A. Headcount roughly 6-50?
-B. Raised seed or Series A (or equivalent) within ~the last 24 months of {{TODAY}}?
-C. In the early-deployment band — pre-deployment, AT first deployment, OR early scaling of first deployments? (TRUE for all three. FALSE only if the company is clearly LONG PAST early deployment: mature, many deployments, an established product operating at scale.)
-D. Likely NO established/dedicated PM function yet?
+305 | === RULES ===
+306 | 1. SOURCE CONFIDENCE — tag EVERY key fact line with exactly one tag:
+307 |    [VERIFIED] = backed by an AUTHORITATIVE source: the company's own website / careers page, Crunchbase, PitchBook, TechCrunch, PRNewswire / BusinessWire, an official press release, major or trade press (Reuters, Bloomberg, Forbes, Fortune, IEEE Spectrum, The Robot Report, pv-magazine, etc.), or the company's official www.linkedin.com page (for headcount/role only).
+308 |    [LOW-CONFIDENCE] = the ONLY support is an aggregator or a single weak source. Aggregators include: ${AGGREGATORS}, plus cbinsights.com, seedtable.com, rocketreach.co, leadiq.com, apollo.io. A fact whose only source is one of these is LOW-CONFIDENCE — NEVER [VERIFIED], no matter how plausible it looks. (Example of the error to avoid: a funding figure sourced only to thecompanycheck.com must be [LOW-CONFIDENCE], not [VERIFIED].)
+309 |    [UNVERIFIED] = human note only, an undated page, a locale LinkedIn mirror, or a single non-authoritative source.
+310 | 2. RECONCILE NOTES vs WEB — the human notes are claims. If a note conflicts with web findings, report the WEB-VERIFIED figure and FLAG the conflict. Never present both as true. Never repeat a note as fact unless web-verified; if only the human asserts it, label it "per internal notes, unverified" and tag [UNVERIFIED].
+311 | 3. RECENCY — never call anything "recent" unless dated within 60 days of {{TODAY}}; always show the date.
+312 | 4. NO ESTIMATES — never invent funding, headcount, or dates.
+313 |  5. REAL SOURCES ONLY — every factual line MUST cite a real, resolvable URL or a specifically named publication with a date (e.g. "TechCrunch, 2025-03-17"). NEVER output an internal search-reference token such as "turn0search7", "turn1search3", a "【...】" bracket, or any "turnXsearchN" placeholder. If your only handle on a fact is such an internal reference and you cannot provide a real URL or named source, you MUST downgrade that fact to [UNVERIFIED] (or drop it). No "turnXsearchN" tokens may appear anywhere in the final dossier.
+314 |  6. PERSON–COMPANY MISMATCH — use the PERSON-COMPANY MATCH signal from the person pass. If it is NOT CONFIRMED or CONTRADICTED (for example, web sources show {{LEAD_NAME}} works somewhere else, or a different person clearly leads {{COMPANY}}), treat this as a LIKELY BAD LEAD. At the VERY TOP of the dossier, before any other lines, write a warning of the form: "⚠️ LIKELY BAD LEAD: could not verify {{LEAD_NAME}} works at {{COMPANY}}. <reason>. Recommend correcting or removing this lead before outreach." where <reason> briefly summarizes the mismatch evidence. In this case, override CONTACT TYPE to "Unknown — unverified person" and set SUGGESTED INTENT to "Do not contact until the person/company pairing is verified." Do not silently ignore this condition.
+315 | 
+316 | === ICP FIT — HARD GATE (mechanical; evaluate booleans on VERIFIED facts only) ===
+317 | The ICP is an EARLY-STAGE robotics/autonomy company transitioning from prototype/R&D INTO or THROUGH its first real deployments and SCALING them. A company that has shipped a first deployment and is now scaling it is INSIDE the ICP — that is the sweet spot, not a disqualifier.
+318 | First, perform a DOMAIN CHECK (gate 0): is this company genuinely a ROBOTICS, AUTONOMY, or PHYSICAL-AI company (they build robots, autonomous systems, drones, AV, robotic hardware, or the software/OS that directly runs such physical systems)? Pure software/SaaS with no physical robotics (influencer marketing, fintech, fundraising tools, travel booking, data marketplaces, general AI apps, dev tools, marketing agencies, consulting, etc.) is DOMAIN: NO.
+319 | - If DOMAIN is NO, the ICP verdict is automatically WEAK. In that case, set "ICP FIT" to "Weak — not a robotics/autonomy company (out of domain)." You MUST still classify CONTACT TYPE based on who the person is (for example, they may still be a Connector), but you must NOT rate them Strong or Moderate on A–E. Do NOT treat a non-robotics/non-autonomy company as an ICP buyer.
+320 | - Only if DOMAIN is YES (or genuinely ambiguous/borderline robotics-adjacent) do you proceed to score A–E below.
+321 | 
+322 | For each criterion output true / false / unknown WITH the evidence:
+323 | A. Headcount roughly 6-50?
+324 | B. Raised seed or Series A (or equivalent) within ~the last 24 months of {{TODAY}}?
+325 | C. In the early-deployment band — pre-deployment, AT first deployment, OR early scaling of first deployments? (TRUE for all three. FALSE only if the company is clearly LONG PAST early deployment: mature, many deployments, an established product line operating at scale.)
+326 | D. Likely NO established/dedicated PM function yet?
+335 | - CONSISTENCY CHECK before writing the verdict: if DOMAIN is YES and none of A/B/E is false and none is unknown, the lead is at minimum Moderate (it CANNOT be Weak). If DOMAIN is YES and A/B/E are all true on VERIFIED facts and C is true, it IS Strong.
 E. Genuinely early-stage robotics/autonomy (NOT a large/old/established-at-scale org — rough guardrails: ~100+ people, or a mature product line operating at scale)?
 SCORING — apply MECHANICALLY. The written verdict MUST match these rules exactly. Do NOT invent any disqualifier beyond A/B/E below:
 - A criterion resting on a [LOW-CONFIDENCE] or [UNVERIFIED] fact counts as "unknown" and cannot support "Strong".
@@ -356,19 +356,19 @@ PM / DELIVERY PAIN SIGNAL: <evidence | Not found> [TAG] (source)
 PERSON BACKGROUND: <prior roles; PM/scrum exposure; IC vs leader> [TAG] (source)
 RECENT ACTIVITY (HOOK): <item + date + age, only if <60d | No recent activity found (<60d)> [TAG] (source)
 NOTES RECONCILIATION: <for each claim in the human notes: CONFIRMED (web agrees) / CONFLICT (web says X, note said Y) / UNVERIFIED (only the human asserts it)>
+363 | ICP FIT CHECKS:
+364 | 0. DOMAIN (robotics/autonomy/physical-AI company?): <yes|no|ambiguous> — <evidence>
+365 | A. Headcount 6-50: <true|false|unknown> — <evidence>
+366 | B. Raised within ~24mo: <true|false|unknown> — <evidence>
+367 | C. In early-deployment band (pre / at / early-scaling first deployment): <true|false|unknown> — <evidence>
+368 | D. No dedicated PM yet: <true|false|unknown> — <evidence>
+369 | E. Early-stage (not large/old/established-at-scale): <true|false|unknown> — <evidence>
+370 | ICP FIT: <Strong | Moderate | Moderate (unverified) | Weak> — one sentence, consistent with the DOMAIN gate and booleans above.
+371 | CONTACT TYPE: <ICP founder/exec | Connector | Engineer/IC | Adjacent | Not relevant | Unknown> — short reason from verified facts.
+372 | SUGGESTED INTENT: <one short line, matched to the contact type per the rules above>
 
-ICP FIT CHECKS:
-A. Headcount 6-50: <true|false|unknown> — <evidence>
-B. Raised within ~24mo: <true|false|unknown> — <evidence>
-C. In early-deployment band (pre / at / early-scaling first deployment): <true|false|unknown> — <evidence>
-D. No dedicated PM yet: <true|false|unknown> — <evidence>
-E. Early-stage (not large/old/established-at-scale): <true|false|unknown> — <evidence>
-ICP FIT: <Strong | Moderate | Moderate (unverified) | Weak> — one sentence, consistent with the booleans above.
-CONTACT TYPE: <ICP founder/exec | Connector | Engineer/IC | Adjacent | Not relevant | Unknown> — short reason from verified facts.
-SUGGESTED INTENT: <one short line, matched to the contact type per the rules above>
-
-RECOMMENDED ANGLE: <1-2 sentences using ONLY [VERIFIED] facts; aimed at the SUGGESTED INTENT; only call something recent if dated <60 days>
-CONFIDENCE & GAPS: <which gating facts (A/B/C/E) are unverified or low-confidence, and what to verify before sending>`;
+373 | RECOMMENDED ANGLE: <1-2 sentences using ONLY [VERIFIED] facts; aimed at the SUGGESTED INTENT; only call something recent if dated <60 days>
+374 | CONFIDENCE & GAPS: <which gating facts (0/A/B/C/E) are unverified or low-confidence, and what to verify before sending>`;
 
 /* ============================================================
    Edit-learning: explain WHY the human changed a draft.

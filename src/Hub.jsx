@@ -1203,7 +1203,7 @@ const KEY_FACT_LABELS = {
 /* ============================================================
    Qualify — paste leads, score-only ICP fit, optional CRM / draft
    ============================================================ */
-function Qualify({ onOpenDraft, onRefreshLeads, onDraftAll, input, setInput, rows, setRows }) {
+function Qualify({ onOpenDraft, onRefreshLeads, onDraftAll, input, setInput, rows, setRows, owner }) {
   // `input` and `rows` are lifted into <Hub> (and persisted) so qualified leads
   // survive navigating to another tab and back. `running`/`batchError` are
   // transient per-mount UI state and stay local.
@@ -1305,6 +1305,7 @@ function Qualify({ onOpenDraft, onRefreshLeads, onDraftAll, input, setInput, row
           companyUrl: row.companyUrl || undefined,
           verdict: row.result?.verdict,
           dossier: row.result?.dossier,
+          owner: owner || undefined,
         }),
       });
       const data = await res.json();
@@ -2033,6 +2034,7 @@ export default function Hub() {
           setInput={setQualifyInput}
           rows={qualifyRows}
           setRows={setQualifyRows}
+          owner={owner}
         />
       ),
       queue: <LeadQueue leads={leads} loading={leadsLoading} error={leadsError} onDraft={openDraft} />,

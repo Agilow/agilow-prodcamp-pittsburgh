@@ -1082,7 +1082,7 @@ app.post("/api/qualify", async (req, res) => {
   }
 });
 
-/* 5) POST /api/add-to-crm { name, company, linkedinUrl?, verdict?, dossier? }
+/* 5) POST /api/add-to-crm { name, company, linkedinUrl?, companyUrl?, verdict?, dossier?, owner? }
    Creates a new page in the Notion CRM. Never auto-creates columns. */
 function fitFromVerdict(verdict) {
   if (!verdict) return null;
@@ -1092,7 +1092,7 @@ function fitFromVerdict(verdict) {
 }
 
 app.post("/api/add-to-crm", async (req, res) => {
-  const { name, company, linkedinUrl, companyUrl, verdict, dossier } = req.body || {};
+  const { name, company, linkedinUrl, companyUrl, verdict, dossier, owner } = req.body || {};
   try {
     if (!name && !company) throw new Error("name or company is required");
     const schema = await getDbSchema();
@@ -1112,6 +1112,19 @@ app.post("/api/add-to-crm", async (req, res) => {
     if (dossier) entries.research = dossier;
     if (linkedinUrl) entries.linkedin = linkedinUrl;
     if (companyUrl) entries.companyUrl = companyUrl;
+
+    // If the Qualify screen was "sending as" a specific owner, persist that so
+    // the new CRM row immediately reflects who this lead is owned by.
+    if (typeof owner === "string" && owner.trim()) {
+      entries.owner = owner.trim();
+    }
+
+    // Mark freshly-qualified leads as "Currently researching" in the Status
+    // column when they are first added from the Qualify screen, so Notion
+    // views can filter on that tag. (Write is best-effort: if the Status
+    // column doesn't have an option with this exact name, buildWrite() will
+    // skip it gracefully.)
+    entries.status = "Currently researching";
 
     const properties = writeProps(schema, entries);
 
