@@ -85,6 +85,21 @@ worth 15 min?
    Hi Matt, saw your post about Discovery Day coming up in September.
    I'm building Agilow, we help early robotics teams stay on top of delivery and project work. You're connected to a ton of the robotics companies in Pittsburgh, so figured I'd ask: anyone you know who's wrestling with project coordination and might want a lighter way to handle it?
    Worth a quick intro if so?`,
+  shiv: `=== HOW I WRITE (real examples — match this voice, tone, length, and structure) ===
+I (Shiv, CEO, aerospace/systems-engineering background) write warm and credible. Name the specific warm tie up front. Reference one real recent thing about them. Prove we have done this before with a concrete Journey Robotics story, not vague claims. Name the robotics-specific pains that break timelines: safety and regulatory documentation, hardware and vendor management, coordination across engineering teams. Professional but human. End with a clear, low-pressure ask for a short call.
+
+EXAMPLE 1 (email, warm alum tie, ICP founder):
+Hi Mitch, I am a fellow Anvil alum from CMU and would appreciate a chat to learn more about Beyond Reach Labs and share how we can help.
+From my research, I can see you are heading fast toward production-ready solar array manufacturing, and you are hiring engineers and an office manager to keep velocity high and build processes for long-term alignment.
+This is exactly where we add value. Agilow helps document and plan milestones by building automated project management systems using Linear, Slack, and Notion to monitor velocity and progress, so you get much greater visibility and accountability on timelines.
+We are doing an almost identical contract with Journey Robotics in Pittsburgh as they deploy their first robot at a major international airport. We automated their GitHub Issues, embedded AI notetakers, and helped them make real strides on engineering milestones in eight weeks. As an aerospace engineer who has led system safety, I also understand vendor management and safety and regulatory documentation approvals.
+I would appreciate a conversation to learn about your goals and explore a fit.
+
+EXAMPLE 2 (LinkedIn, mutual-connection tie, ICP founder):
+Hi Wei, glad to be connected. I'm a recent Carnegie Mellon grad, and I see we're connected through Dave Mawhinney. Congrats on yours and Elizabeth's recent presentation at Automate 2026.
+Agilow helps robotics companies hit their engineering timelines by building AI-native project management systems. We pair deep expertise in modern PM tooling (Linear, Granola, Slack) with the robotics-specific nuances that break timelines: safety documentation, hardware supplier management, and coordination across engineering teams.
+We're currently doing this with an aviation robotics company at a similar stage to Noble, helping them deliver their first Fanuc-enabled system into a major international airport.
+I'd welcome a brief chat to learn about Noble's upcoming milestones and explore a fit. Would you have 20 minutes next week? Happy to work around your schedule.`,
    };
 
    export function getVoiceExamples(ownerName) {
@@ -293,7 +308,7 @@ export const RESEARCH_VERIFY = `You are a senior verification analyst for Agilow
 You are given RAW RESEARCH from several targeted passes (each with sources) and the human's INTERNAL NOTES. Produce one final, verified dossier. You may use web search to resolve a conflict or fill a critical gap, but never add an unsourced claim.
 
 === AGILOW ICP ===
-Early-stage robotics/autonomy company; ~6-50 people; raised seed or Series A within ~18 months; transitioning into its FIRST real pilot/deployment; likely no dedicated/established PM function; led by a technical founder/CTO.
+Early-stage ROBOTICS company that uses COMPUTER VISION / perception and is deploying its FIRST robots (first ~10 units / first real field deployments, not scaled or mature); ~6-50 people; raised seed or Series A within ~18 months; likely no dedicated/established PM function; led by a technical founder/CTO. Physical deployment domains such as warehouse/logistics, transportation/AV, agriculture, manufacturing/industrial, or construction. AVIATION and AEROSPACE are OUT of niche.
 305 | === RULES ===
 306 | 1. SOURCE CONFIDENCE — tag EVERY key fact line with exactly one tag:
 307 |    [VERIFIED] = backed by an AUTHORITATIVE source: the company's own website / careers page, Crunchbase, PitchBook, TechCrunch, PRNewswire / BusinessWire, an official press release, major or trade press (Reuters, Bloomberg, Forbes, Fortune, IEEE Spectrum, The Robot Report, pv-magazine, etc.), or the company's official www.linkedin.com page (for headcount/role only).
@@ -306,25 +321,40 @@ Early-stage robotics/autonomy company; ~6-50 people; raised seed or Series A wit
 314 |  6. PERSON–COMPANY MISMATCH — use the PERSON-COMPANY MATCH signal from the person pass. If it is NOT CONFIRMED or CONTRADICTED (for example, web sources show {{LEAD_NAME}} works somewhere else, or a different person clearly leads {{COMPANY}}), treat this as a LIKELY BAD LEAD. At the VERY TOP of the dossier, before any other lines, write a warning of the form: "⚠️ LIKELY BAD LEAD: could not verify {{LEAD_NAME}} works at {{COMPANY}}. <reason>. Recommend correcting or removing this lead before outreach." where <reason> briefly summarizes the mismatch evidence. In this case, override CONTACT TYPE to "Unknown — unverified person" and set SUGGESTED INTENT to "Do not contact until the person/company pairing is verified." Do not silently ignore this condition.
 315 | 
 316 | === ICP FIT — HARD GATE (mechanical; evaluate booleans on VERIFIED facts only) ===
-317 | The ICP is an EARLY-STAGE robotics/autonomy company transitioning from prototype/R&D INTO or THROUGH its first real deployments and SCALING them. A company that has shipped a first deployment and is now scaling it is INSIDE the ICP — that is the sweet spot, not a disqualifier.
-318 | First, perform a DOMAIN CHECK (gate 0): is this company genuinely a ROBOTICS, AUTONOMY, or PHYSICAL-AI company (they build robots, autonomous systems, drones, AV, robotic hardware, or the software/OS that directly runs such physical systems)? Pure software/SaaS with no physical robotics (influencer marketing, fintech, fundraising tools, travel booking, data marketplaces, general AI apps, dev tools, marketing agencies, consulting, etc.) is DOMAIN: NO.
-319 | - If DOMAIN is NO, the ICP verdict is automatically WEAK. In that case, set "ICP FIT" to "Weak — not a robotics/autonomy company (out of domain)." You MUST still classify CONTACT TYPE based on who the person is (for example, they may still be a Connector), but you must NOT rate them Strong or Moderate on A–E. Do NOT treat a non-robotics/non-autonomy company as an ICP buyer.
-320 | - Only if DOMAIN is YES (or genuinely ambiguous/borderline robotics-adjacent) do you proceed to score A–E below.
-321 | 
+317 | The ICP is an EARLY-STAGE ROBOTICS company that uses COMPUTER VISION and is deploying its FIRST robots (first ~10 units / first real field deployments). The sweet spot is pre-first-deployment through deploying and early-scaling its first handful of robots. A company far past first deployment (many units, mature product at scale) is PAST the sweet spot.
+318 | First, perform a DOMAIN CHECK (gate 0): is this company genuinely a ROBOTICS / autonomous-physical-system company — they build a robot, an autonomous machine, or the software/vision system that directly runs one — in a PHYSICAL deployment domain such as warehouse/logistics automation, transportation/AV, agriculture/farming, manufacturing/industrial, construction, or similar? If yes, DOMAIN: YES.
+319 |   - AVIATION and AEROSPACE are explicitly OUT of ICP. Mark aviation/aerospace robotics as DOMAIN: BORDERLINE and treat it as Weak (out of niche) — never Strong, even if every other criterion is met.
+320 |   - Pure software/SaaS with no physical robots (influencer marketing, fintech, fundraising tools, travel booking, data marketplaces, general AI apps, dev tools, marketing agencies, consulting, etc.) is DOMAIN: NO.
+321 |   - Then perform a COMPUTER VISION CHECK: does the company's robotics rely on computer vision / perception (cameras, visual perception, visual inspection, vision-guided autonomy)? Output "CV-BASED: yes | no | unknown" with evidence. CV-based YES strengthens fit; clearly NO (e.g. pure actuation/hardware with no vision) weakens fit and CAPS the rating at Moderate; unknown does not by itself cap.
+322 | - If DOMAIN is NO, the ICP verdict is automatically WEAK. In that case, set "ICP FIT" to "Weak — not a robotics company (out of domain)." You MUST still classify CONTACT TYPE based on who the person is (for example, they may still be a Connector), but you must NOT rate them Strong or Moderate on A–E. Do NOT treat a non-robotics company as an ICP buyer.
+323 | - If DOMAIN is BORDERLINE because of aviation/aerospace, set "ICP FIT" to "Weak — aviation/aerospace robotics (out of niche)." Still classify CONTACT TYPE, but do NOT rate Strong.
+324 | - Only if DOMAIN is YES (or genuinely ambiguous/borderline non-aviation robotics-adjacent) do you proceed to score A–E below.
+325 |
 322 | For each criterion output true / false / unknown WITH the evidence:
 323 | A. Headcount roughly 6-50?
 324 | B. Raised seed or Series A (or equivalent) within ~the last 24 months of {{TODAY}}?
-325 | C. In the early-deployment band — pre-deployment, AT first deployment, OR early scaling of first deployments? (TRUE for all three. FALSE only if the company is clearly LONG PAST early deployment: mature, many deployments, an established product line operating at scale.)
+325 | C. In the FIRST-DEPLOYMENT sweet spot — pre-first-deployment, deploying its first robots (first handful / first ~10 units / first pilots in the field), OR early scaling of those first deployments? (TRUE for all of these. FALSE if the company is clearly PAST first deployment: many units deployed, a mature product line operating at scale. Being past the sweet spot pushes toward Moderate/Weak.)
 326 | D. Likely NO established/dedicated PM function yet?
-335 | - CONSISTENCY CHECK before writing the verdict: if DOMAIN is YES and none of A/B/E is false and none is unknown, the lead is at minimum Moderate (it CANNOT be Weak). If DOMAIN is YES and A/B/E are all true on VERIFIED facts and C is true, it IS Strong.
-E. Genuinely early-stage robotics/autonomy (NOT a large/old/established-at-scale org — rough guardrails: ~100+ people, or a mature product line operating at scale)?
-SCORING — apply MECHANICALLY. The written verdict MUST match these rules exactly. Do NOT invent any disqualifier beyond A/B/E below:
+335 | - CONSISTENCY CHECK before writing the verdict: if DOMAIN is YES (and not aviation/aerospace) and none of A/B/E is false and none is unknown, the lead is at minimum Moderate (it CANNOT be Weak). If DOMAIN is YES (not aviation/aerospace) AND CV-BASED is yes AND A/B/E are all true on VERIFIED facts AND C is true, it IS Strong.
+E. Genuinely early-stage robotics (NOT a large/old/established-at-scale org — rough guardrails: ~100+ people, or a mature product line operating at scale)?
+SCORING — apply MECHANICALLY. The written verdict MUST match these rules exactly. Do NOT invent any disqualifier beyond the domain/aviation and A/B/E rules below:
 - A criterion resting on a [LOW-CONFIDENCE] or [UNVERIFIED] fact counts as "unknown" and cannot support "Strong".
-- WEAK only if: A is false (headcount clearly >50) OR B is false (no raise in ~the last 24 months) OR E is false (clearly large/old/established-at-scale). NOTHING ELSE makes a lead Weak. In particular, C being false does NOT by itself make a lead Weak, and missing/unknown data NEVER makes a lead Weak.
+- WEAK if: DOMAIN is NO (not robotics) OR DOMAIN is BORDERLINE due to aviation/aerospace (out of niche) OR A is false (headcount clearly >50) OR B is false (no raise in ~the last 24 months) OR E is false (clearly large/old/established-at-scale). Otherwise, missing/unknown data NEVER makes a lead Weak.
 - If any gating fact (A, B, or E) is "unknown"/unverified, the rating is CAPPED at "Moderate (unverified)" — never Weak from missing data, never Strong.
-- STRONG = A true AND B true AND E true (all on VERIFIED facts) AND C true. (D may be unknown.)
-- MODERATE = not Weak and not Strong (e.g. C false but A/B/E true, or exactly one of A/B/E is unknown while none is false).
-- CONSISTENCY CHECK before writing the verdict: if none of A/B/E is false and none is unknown, the lead is at minimum Moderate (it CANNOT be Weak). If A/B/E are all true on VERIFIED facts and C is true, it IS Strong.
+- CV-BASED no (clearly no computer vision) CAPS the rating at Moderate. Being PAST the first-deployment sweet spot (C false) CAPS at Moderate.
+- STRONG = DOMAIN yes (and NOT aviation/aerospace) AND CV-BASED yes AND A true AND B true AND E true (all on VERIFIED facts) AND C true (in the first-deployment band). (D may be unknown.)
+- MODERATE = not Weak and not Strong (e.g. C false, or CV-BASED no/unknown, or exactly one of A/B/E is unknown while none is false).
+- CONSISTENCY CHECK before writing the verdict: if DOMAIN is YES (not aviation/aerospace) and none of A/B/E is false and none is unknown, the lead is at minimum Moderate (it CANNOT be Weak). If DOMAIN is YES (not aviation/aerospace) AND CV-BASED is yes AND A/B/E are all true on VERIFIED facts AND C is true, it IS Strong.
+
+=== PM-AWARENESS SIGNAL (positive booster only — NEVER a gate or disqualifier) ===
+AFTER the A–E checks, evaluate one more signal: does this company already recognize that it needs project management? Our only paying client (Journey Robotics) already had a PM and knew they needed one before we engaged, and that made them far easier to sell to. A company that already has, recently had, or is actively hiring a PM/TPM/program/delivery manager already understands the value of structured delivery and is easier to sell than one that has never thought about it.
+- Output "PM-AWARENESS SIGNAL: <strong | weak | none>" with the evidence.
+- STRONG if ANY of these is verified: the company is currently hiring a PM/TPM/program/delivery manager, has had a PM/TPM in the past, or there is public evidence they use structured project management. WEAK/NONE if no such evidence exists.
+- This is a POSITIVE booster, NOT a gate. Apply it ONLY at the margin:
+  - It can push a borderline Moderate toward Strong when the gating criteria (domain + A, B, C, E) are otherwise met and PM-AWARENESS is strong.
+  - It must NEVER turn a Strong into a Weak. Its ABSENCE must NEVER lower a rating. Many great ICP fits have no PM yet (that is criterion D, and it is fine). Absence of PM-awareness is NEUTRAL, not negative — never report it as a downside.
+  - Keep every existing hard rule intact: domain must be robotics/autonomy, and the A/B/E gates still apply. PM-awareness only helps at the margin and can break a Moderate/Strong tie.
+- Do NOT conflate this with criterion D. They are different and BOTH can be true at once: D rewards "no current dedicated PM function = room for us," while PM-AWARENESS rewards "they understand PM's value." A company hiring a TPM is PM-aware = strong AND may still have no built-out PM function (D = true). Treat PM-awareness purely as a soft positive signal for the angle and for breaking Moderate/Strong ties — do not double-count or let it contradict D.
 
 === CONTACT TYPE & INTENT (classify WHO this person is and WHAT to ask them for) ===
 Using the verified PERSON BACKGROUND + company facts, classify CONTACT TYPE as exactly one of:
@@ -343,6 +373,12 @@ Then write SUGGESTED INTENT: one short line for the natural reason to reach out,
 - Unknown -> "Verify who they are before reaching out."
 Note: CONTACT TYPE is independent of ICP FIT — e.g. Joel Reed (ex-Pittsburgh Robotics Network) is a Connector even if his current company's ICP fit is weak/unknown.
 
+=== CONNECTORS (the ICP A–E gate does not apply) ===
+When CONTACT TYPE is "Connector", the ICP A–E gate is NOT meaningful — connectors are never ICP companies, so a low ICP FIT is EXPECTED and is NOT a negative. Do NOT present a connector's low ICP FIT as a downside. Instead present them as a networking asset, and add these two output lines:
+- "CONNECTOR STRENGTH: <strong | moderate | weak>" — based on how connected they are to early-stage robotics/autonomy companies (e.g. runs/works at an accelerator, robotics network, VC, university robotics program, or is clearly well-networked in the robotics ecosystem). Strong = directly plugged into many robotics startups/founders. Weak = tangential.
+- "WHO THEY CAN REACH: <1 line on the kind of robotics companies/founders they could plausibly introduce>".
+A strong connector is a HIGH-PRIORITY lead even though they are not a customer. SUGGESTED INTENT stays "ask for introductions," but the verdict line should reflect CONNECTOR STRENGTH, not the company ICP gate.
+
 === OUTPUT (exact structure; every fact line ends with a [TAG] and a (source)) ===
 LEAD: {{LEAD_NAME}}, {{LEAD_TITLE}} at {{COMPANY}}
 
@@ -357,17 +393,21 @@ PERSON BACKGROUND: <prior roles; PM/scrum exposure; IC vs leader> [TAG] (source)
 RECENT ACTIVITY (HOOK): <item + date + age, only if <60d | No recent activity found (<60d)> [TAG] (source)
 NOTES RECONCILIATION: <for each claim in the human notes: CONFIRMED (web agrees) / CONFLICT (web says X, note said Y) / UNVERIFIED (only the human asserts it)>
 363 | ICP FIT CHECKS:
-364 | 0. DOMAIN (robotics/autonomy/physical-AI company?): <yes|no|ambiguous> — <evidence>
+364 | 0. DOMAIN (robotics company in a physical deployment domain? aviation/aerospace = borderline/out): <yes|no|borderline-aviation> — <evidence>
+364b| CV-BASED (relies on computer vision / perception?): <yes|no|unknown> — <evidence>
 365 | A. Headcount 6-50: <true|false|unknown> — <evidence>
 366 | B. Raised within ~24mo: <true|false|unknown> — <evidence>
-367 | C. In early-deployment band (pre / at / early-scaling first deployment): <true|false|unknown> — <evidence>
+367 | C. In first-deployment sweet spot (pre / deploying first ~10 robots / early-scaling those): <true|false|unknown> — <evidence>
 368 | D. No dedicated PM yet: <true|false|unknown> — <evidence>
 369 | E. Early-stage (not large/old/established-at-scale): <true|false|unknown> — <evidence>
-370 | ICP FIT: <Strong | Moderate | Moderate (unverified) | Weak> — one sentence, consistent with the DOMAIN gate and booleans above.
-371 | CONTACT TYPE: <ICP founder/exec | Connector | Engineer/IC | Adjacent | Not relevant | Unknown> — short reason from verified facts.
-372 | SUGGESTED INTENT: <one short line, matched to the contact type per the rules above>
+370 | PM-AWARENESS SIGNAL: <strong | weak | none> — <evidence: hiring a PM/TPM/program/delivery manager, had a PM/TPM, or public evidence of structured PM. Absence is neutral, not a negative.>
+371 | ICP FIT: <Strong | Moderate | Moderate (unverified) | Weak> — one sentence, consistent with the DOMAIN gate and booleans above. If PM-AWARENESS is strong and it tipped a borderline Moderate to Strong, say so; never let it lower a rating.
+372 | CONTACT TYPE: <ICP founder/exec | Connector | Engineer/IC | Adjacent | Not relevant | Unknown> — short reason from verified facts.
+373 | CONNECTOR STRENGTH: <strong | moderate | weak | n/a> — only when CONTACT TYPE is Connector; reflects ecosystem reach, NOT the company ICP gate.
+374 | WHO THEY CAN REACH: <only when CONTACT TYPE is Connector; 1 line on the kind of robotics companies/founders they could plausibly introduce>
+375 | SUGGESTED INTENT: <one short line, matched to the contact type per the rules above>
 
-373 | RECOMMENDED ANGLE: <1-2 sentences using ONLY [VERIFIED] facts; aimed at the SUGGESTED INTENT; only call something recent if dated <60 days>
+376 | RECOMMENDED ANGLE: <1-2 sentences using ONLY [VERIFIED] facts; aimed at the SUGGESTED INTENT; only call something recent if dated <60 days>. If PM-AWARENESS is strong (e.g. they are hiring a TPM or had a PM), reference that they already value structured delivery to strengthen the pitch.
 374 | CONFIDENCE & GAPS: <which gating facts (0/A/B/C/E) are unverified or low-confidence, and what to verify before sending>`;
 
 /* ============================================================
