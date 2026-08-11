@@ -1,0 +1,91 @@
+name: scout
+
+# Sweeps Reddit for people who run standups, scores them, and writes the good
+# ones to the Notion CRM. See server/scout-config.js for what it looks at and
+# how much it is allowed to spend per run.
+#
+# Needs two repo secrets:
+#   SCOUT_URL     the Render backend origin, no trailing slash
+#                 e.g. https://agilow-hub-api.onrender.com
+#   SCOUT_SECRET  must match the SCOUT_SECRET env var on Render
+#
+# Without them the job fails on the guard step rather than posting nowhere.
+
+on:
+  schedule:
+    # Every 5 hours at :17. Off the hour on purpose: GitHub's scheduler is
+    # busiest on the hour and delays those runs the most.
+    - cron: "17 */5 * * *"
+  workflow_dispatch:
+
+# A slow run must never overlap the next tick and double-write leads.
+concurrency:
+  group: scout
+  cancel-in-progress: false
+
+jobs:
+  scout:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check secrets are set
+        env:
+          SCOUT_URL: ${{ secrets.SCOUT_URL }}
+          SCOUT_SECRET: ${{ secrets.SCOUT_SECRET }}
+        run: |
+          if [ -z "$SCOUT_URL" ] || [ -z "$SCOUT_SECRET" ]; then
+            echo "SCOUT_URL and SCOUT_SECRET must both be set as repo secrets."
+            echo "Settings -> Secrets and variables -> Actions -> New repository secret"
+            exit 1
+          fi
+          echo "Secrets present."
+
+      - name: Wake the Render instance
+        env:
+          SCOUT_URL: ${{ secrets.SCOUT_URL }}
+        run: |
+          # Render's free plan sleeps after inactivity and a cold start takes
+          # a while. Ping first so the scout POST does not spend its own
+          # timeout waiting for the process to boot.
+          curl -sS -m 60 "$SCOUT_URL/api/ping" || echo "ping failed, continuing anyway"
+          sleep 20
+
+      - name: Run the scout
+        env:
+          SCOUT_URL: ${{ secrets.SCOUT_URL }}
+          SCOUT_SECRET: ${{ secrets.SCOUT_SECRET }}
+        run: |
+          set -o pipefail
+          code=$(curl -sS -X POST "$SCOUT_URL/api/scout" \
+            -H "Authorization: Bearer $SCOUT_SECRET" \
+            -H "Content-Type: application/json" \
+            -d '{}' \
+            -m 600 \
+            -o response.json \
+            -w "%{http_code}")
+
+          echo "HTTP $code"
+          echo "--- response ---"
+          # Pretty-print when possible, fall back to raw so a non-JSON error
+          # body (a Render 502 page, say) is still visible in the log.
+          jq . response.json 2>/dev/null || cat response.json
+          echo
+
+          if [ "$code" != "200" ]; then
+            echo "Scout failed with HTTP $code"
+            exit 1
+          fi
+
+      - name: Summarize
+        if: always()
+        run: |
+          if [ -f response.json ]; then
+            {
+              echo "### Scout run"
+              echo ""
+              jq -r '"scanned: \(.scanned)\nprefiltered: \(.prefiltered)\nafter dedupe: \(.deduped)\nscored: \(.scored)\nwritten: \(.written)\npartial: \(.partial)\nduration: \(.durationMs / 1000 | floor)s"' response.json 2>/dev/null || echo "no parseable response"
+              echo ""
+              echo "**Written:**"
+              jq -r '.writtenRows[]? | "- u/\(.username) [\(.verdict)] \(.contactType) — \(.permalink)"' response.json 2>/dev/null || true
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi

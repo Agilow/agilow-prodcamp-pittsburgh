@@ -1769,13 +1769,17 @@ app.post("/api/scout", async (req, res) => {
         `scored ${counts.scored}, written ${counts.written}${partial ? " (PARTIAL)" : ""}`
     );
 
-    res.json({ ...counts, written, skipped, partial, dryRun, durationMs });
+    // `written` is the COUNT (per the response contract); the detail rows are
+    // writtenRows. Spreading counts and then a same-named array silently
+    // replaced the number with the array, which the workflow summary rendered
+    // as a wall of JSON where a digit belonged.
+    res.json({ ...counts, writtenRows: written, skipped, partial, dryRun, durationMs });
   } catch (err) {
     console.error("POST /api/scout failed:", err?.message || err);
     res.status(500).json({
       error: err?.message || "Scout failed",
       ...counts,
-      written,
+      writtenRows: written,
       skipped,
       partial: true,
       durationMs: Date.now() - startedAt,
