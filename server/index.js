@@ -1084,11 +1084,20 @@ app.post("/api/qualify", async (req, res) => {
 
 /* 5) POST /api/add-to-crm { name, company, linkedinUrl?, companyUrl?, verdict?, dossier?, owner? }
    Creates a new page in the Notion CRM. Never auto-creates columns. */
+/* Verdict -> the CRM's "Fit" select.
+   The verdict vocabulary is Strong / Moderate / Moderate (unverified) / Weak,
+   but the live Notion "Fit" column is a select with exactly three options:
+   Strong | Medium | Weak. Notion auto-creates select options on write, so
+   returning "Moderate" here would silently add a FOURTH option and split the
+   same leads across two values in every existing view and filter.
+   So the mapping stays Medium, deliberately: this is the one place the two
+   vocabularies meet, and the CRM's wins. Rename the Notion option to Moderate
+   and this line follows — not before. */
 function fitFromVerdict(verdict) {
   if (!verdict) return null;
   if (/strong/i.test(verdict)) return "Strong";
   if (/weak/i.test(verdict)) return "Weak";
-  return "Medium"; // Moderate / Moderate (unverified)
+  return "Medium"; // Moderate / Moderate (unverified) -> the CRM's "Medium"
 }
 
 app.post("/api/add-to-crm", async (req, res) => {

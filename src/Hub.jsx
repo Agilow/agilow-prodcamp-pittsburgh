@@ -1565,9 +1565,11 @@ function Qualify({ onOpenDraft, onRefreshLeads, onDraftAll, input, setInput, row
                               {(row.result.checks || []).map((c) => (
                                 <li key={c.criterion} className={cx("qualify-check", c.value)}>
                                   <span className="qualify-check-val">
-                                    {c.value === true
+                                    {/* extractVerdict's schema types `value` as the
+                                        STRINGS "true"/"false"/"unknown", not booleans. */}
+                                    {c.value === "true"
                                       ? "Yes"
-                                      : c.value === false
+                                      : c.value === "false"
                                         ? "No"
                                         : "?"}
                                   </span>
