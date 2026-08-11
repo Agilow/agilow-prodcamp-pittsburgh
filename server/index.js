@@ -1747,7 +1747,11 @@ app.post("/api/scout", async (req, res) => {
         // both live in Notes. getExistingLeadKeys reads them back out.
         const notionPageId = await addLeadToCrm({
           name: post.author,
-          company: row.role ? `${row.role} (via r/${post.subreddit})` : `r/${post.subreddit}`,
+          // The title column is "Company Name" and a Reddit lead has no
+          // company. Use the source, which is short and groups in a view.
+          // The role sentence from keyFacts is prose, not a title: it belongs
+          // in the dossier, not in the column people scan.
+          company: `r/${post.subreddit} · Reddit`,
           verdict: result.verdict,
           dossier: result.dossier,
           owner: SCOUT_OWNER,
