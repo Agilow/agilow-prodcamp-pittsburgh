@@ -174,62 +174,71 @@ COMPANY ONE-LINER: <one concrete sentence> | source: <url>
 WEBSITE: <official url | Not found>
 HQ: <city, country | Not found> | source: <url>`;
 
-export const RESEARCH_FUNDING = `You are a startup funding analyst with live web search. Research funding for {{COMPANY}}. Today is {{TODAY}}.
-
-PRIORITIZE these sources, and search them explicitly (e.g. "site:crunchbase.com {{COMPANY}}", "site:techcrunch.com {{COMPANY}} raises", "{{COMPANY}} press release funding"):
-1. Crunchbase, 2. PitchBook, 3. TechCrunch / reputable tech press, 4. the company's own press release / PRNewswire / BusinessWire.
-
-CONFIDENCE RULES:
-- Figure supported by any of the above authoritative sources -> tag VERIFIED.
-- Figure whose ONLY support is an aggregator (${AGGREGATORS}) -> tag LOW-CONFIDENCE.
-- Nothing authoritative found -> write "Not found". NEVER estimate, infer, or average an amount.
-- Report the LATEST round AND total raised across rounds. Note any conflicting figures between sources.
-
-OUTPUT (exactly):
-LATEST ROUND: <round name, amount, date (YYYY-MM or YYYY-MM-DD), lead + notable investors | Not found> [VERIFIED|LOW-CONFIDENCE] | source: <url>
-TOTAL RAISED: <amount across all rounds | Not found> [VERIFIED|LOW-CONFIDENCE] | source: <url>
-FOUNDED: <year | Not found> | source: <url>
-CONFLICTS: <any figures that disagree across sources, with which source said what | none>`;
-
-export const RESEARCH_TEAM = `You are a research analyst with live web search. Find headcount and stage for {{COMPANY}}. Today is {{TODAY}}.
+/* Role-verification pass. Runs ONLY when the lead arrived without a title —
+   a pasted connections list usually supplies one, and re-deriving it wastes a
+   search. Feeds gate 0 (ROLE) and criterion A. */
+export const RESEARCH_ROLE = `You are a research analyst with live web search. Establish the CURRENT job title and process responsibilities of {{LEAD_NAME}} at {{COMPANY}}. LinkedIn (if given): {{LINKEDIN_URL}}. Today is {{TODAY}}.
 
 RULES:
-- Headcount: give an APPROXIMATE range; prefer the company's own site/team page or the official www.linkedin.com company "employees" count. Aggregators (${AGGREGATORS}) are LOW-CONFIDENCE.
-- Founding year with source.
-- Deployment stage: decide PRE-pilot (R&D/prototype), FIRST pilot/deployment in progress, or ALREADY widely deployed/mature — quote the evidence and date it.
+- Find their LITERAL current title, as written on their own www.linkedin.com profile, their employer's team page, a conference speaker bio, or a bylined post. Quote it verbatim; do not paraphrase or upgrade it.
+- State the title's start date if visible, so a stale title can be spotted.
+- CEREMONY OWNERSHIP is the key question: is there evidence this person RUNS a recurring team ceremony (daily standup, sprint planning, retro) — they facilitate it, call it, or own the process — as opposed to merely attending one? Quote the evidence. "Scrum Master", "Delivery Lead", "Engineering Manager" and similar titles are strong evidence; a plain IC title is evidence against.
+- If the person cannot be found at this company at all, say so plainly — that is a valid and useful answer.
+- VERIFIED = their own profile / employer page / speaker bio. Aggregators (${AGGREGATORS}) are LOW-CONFIDENCE.
 
 OUTPUT (exactly):
-TEAM SIZE: <range, e.g. 11-50> [VERIFIED|LOW-CONFIDENCE] | source: <url>
-FOUNDED: <year | Not found> [VERIFIED|LOW-CONFIDENCE] | source: <url>
-DEPLOYMENT STAGE: <pre-pilot | first pilot/deployment in progress | already deployed/mature | unknown> — <quote/evidence + date> [VERIFIED|LOW-CONFIDENCE] | source: <url>`;
+CURRENT TITLE: <verbatim title | Not found> [VERIFIED|LOW-CONFIDENCE] | source: <url>
+TITLE SINCE: <date or duration | Not found> | source: <url>
+CEREMONY OWNERSHIP: <runs it | attends only | unknown> — <evidence> [VERIFIED|LOW-CONFIDENCE] | source: <url>
+EMPLOYMENT CONFIRMED: <yes | no | contradicted> — <evidence>`;
 
-export const RESEARCH_HIRING = `You are a research analyst with live web search. Find hiring signals for {{COMPANY}}. Today is {{TODAY}}.
+/* Team-size pass. Runs ONLY when the team size is not already known.
+   Scopes to the team THIS PERSON leads, which is what criterion B grades —
+   company headcount is a fallback, not the answer. */
+export const RESEARCH_TEAM = `You are a research analyst with live web search. Find how big a team {{LEAD_NAME}} ({{LEAD_TITLE}}) actually leads at {{COMPANY}}. Today is {{TODAY}}.
 
 RULES:
-- Search the careers page and job boards (Ashby, Greenhouse, Lever, Workable, www.linkedin.com/jobs, simplify.jobs).
-- Specifically look for any Project/Program Manager / Technical Program Manager / delivery / ops role, and any burst of engineering hiring.
-- Quote role titles and posting dates. Date everything against {{TODAY}}.
-- A RENDERED CAREERS PAGE block may be provided below. It was captured with a JavaScript-rendering scrape of the company's OWN careers/jobs page, so it shows live openings that ordinary search engines often cannot see. When it lists real roles, treat them as AUTHORITATIVE and [VERIFIED], cite the SOURCE url shown in the block, and DO NOT report "Not found" for roles that clearly appear there. If it says "(none captured)" or is empty, rely on web search instead.
-
-RENDERED CAREERS PAGE (JS-rendered scrape; may be empty):
-{{CAREERS_CONTENT}}
+- The question is the size of THEIR team — the group whose standup they would run — not the size of the whole company. Look for "leading a team of N", "managing N engineers", squad/pod/crew descriptions, org charts, their own posts, or a team page listing direct reports.
+- Give a number or a tight range. Say which it is: TEAM (their own group) or COMPANY (whole-org headcount, used only as a fallback when the team is not discoverable).
+- Company headcount alone does NOT establish their team size. Report it separately and label it as such.
+- If neither is discoverable, write "Not found". NEVER estimate. Unknown is an acceptable answer here and is not a failure.
+- Prefer the company's own site/team page, the person's own posts, or the official www.linkedin.com company page. Aggregators (${AGGREGATORS}) are LOW-CONFIDENCE.
 
 OUTPUT (exactly):
-HIRING: <yes | no | unknown>
-PM/PROGRAM ROLE: <title + posting date | Not found> [VERIFIED|LOW-CONFIDENCE] | source: <url>
-ENG HIRING BURST: <evidence | Not found> | source: <url>`;
+TEAM SIZE: <number or range | Not found> | scope: <TEAM | COMPANY> [VERIFIED|LOW-CONFIDENCE] | source: <url>
+COMPANY HEADCOUNT: <range | Not found> [VERIFIED|LOW-CONFIDENCE] | source: <url>
+REPORTS / SQUAD EVIDENCE: <quote or description | Not found> | source: <url>`;
+
+/* Tooling + process-pain pass. Replaces the old careers/hiring pass, which
+   answered a company-ICP question we no longer ask. Feeds criterion D
+   (informational) and the PAIN signal (booster). */
+export const RESEARCH_TOOLING = `You are a research analyst with live web search. Find what task board and chat tools the team around {{LEAD_NAME}} at {{COMPANY}} visibly uses, and any public sign that they feel standup or status-meeting pain. Today is {{TODAY}}.
+
+RULES:
+- TOOLING: look for concrete evidence the team uses a task board or team chat we could integrate with — Slack, Jira, Linear, Notion, GitHub Projects, Asana, Microsoft Teams, Trello, Shortcut. Good sources: engineering blog posts, job ads listing the stack, conference talks, public repos and issue templates, the person's own posts, integration/marketplace listings. Name the specific tool and quote the evidence.
+- Absence of tooling evidence is a normal, acceptable answer. Write "Not found" and move on — do NOT guess a default stack.
+- PAIN: separately, look for anything public where this person or their team describes standup or status-reporting friction. Things that count: standups running long, people arriving late, "do we still need this meeting", async vs live standup debates, chasing people for updates, writing the same update twice, status-report overhead. Quote it and date it.
+- Only count items that are genuinely about THIS person or their team. A generic industry article they merely shared is weak, not strong.
+- VERIFIED = the company's or person's own material, or named press. Aggregators (${AGGREGATORS}) are LOW-CONFIDENCE.
+
+OUTPUT (exactly):
+TOOLING: <named tools | Not found> [VERIFIED|LOW-CONFIDENCE] | source: <url>
+TOOLING EVIDENCE: <quote or description | Not found> | source: <url>
+PAIN SIGNAL: <quote + date (YYYY-MM-DD) | Not found> [VERIFIED|LOW-CONFIDENCE] | source: <url>`;
 
 export const RESEARCH_PERSON = `You are a research analyst with live web search. Research the specific person: {{LEAD_NAME}}, {{LEAD_TITLE}} at {{COMPANY}}. LinkedIn (if given): {{LINKEDIN_URL}}.
 
 RULES:
 - Search their NAME specifically. Find prior companies/roles.
-- Assess: have they likely had scrum/structured-PM exposure (worked at a larger org, was a tech lead/manager)? Are they an individual contributor or a leader now?
+- Assess: do they run team process (scrum master, PM, product owner, EM, team lead, hands-on founder), or are they an individual contributor who attends other people's ceremonies?
+- REACHABILITY matters: note where they are publicly active and could be messaged — LinkedIn activity, X, Reddit, a Slack/Discord community, a blog, conference talks. "No public activity found" is a valid answer.
 - VERIFIED = their own LinkedIn/bio/press. LOW-CONFIDENCE = sales-intel aggregators (${AGGREGATORS}).
 
 OUTPUT (exactly):
 PERSON BACKGROUND: <prior roles & companies> [VERIFIED|LOW-CONFIDENCE] | source: <url>
-PM/SCRUM EXPOSURE: <likely yes/no + why>
+PROCESS OWNERSHIP: <runs team ceremonies | attends only | unknown> — <evidence>
 IC vs LEADER: <which, + evidence>
+REACHABILITY: <where they are publicly active and messageable | Not found> [VERIFIED|LOW-CONFIDENCE] | source: <url>
 PERSON-COMPANY MATCH: <CONFIRMED | NOT CONFIRMED | CONTRADICTED> — <evidence>`;
 
 export const RESEARCH_RECENT = `You are a research analyst with live web search. Find the MOST RECENT public item about {{COMPANY}} or {{LEAD_NAME}}. Today is {{TODAY}}.
@@ -239,9 +248,11 @@ CRITICAL DATE RULES:
 - "Recent" means STRICTLY within the last 60 days. Anything older is NOT recent — report it with its real date and age, and do not dress it up.
 - If there is no genuinely recent (<60 day) item, output "No recent activity found (<60d)".
 - Treat locale LinkedIn mirrors (${AGGREGATORS}) and undated pages as UNVERIFIED. A claim found only on such a source must be tagged UNVERIFIED.
+- PRIORITISE, among equally recent items, anything where they talk about how their team WORKS: standups, sprint ceremonies, status meetings, async updates, planning, delivery process. That is the most useful hook we can find. Report it even if a flashier but less relevant item exists, and say which is which.
 
 OUTPUT (exactly):
 MOST RECENT ITEM: <description> | date: <YYYY-MM-DD> | age: <N days> [VERIFIED|UNVERIFIED] | source: <url>
+PROCESS-RELATED ITEM: <description + date, if any item touches how the team works | None found> | source: <url>
 RECENT (<60d)?: <yes | no>
 OLDER NOTABLE ITEMS: <optional: dated items >60d that may still be useful context, each with date>`;
 

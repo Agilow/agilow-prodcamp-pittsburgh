@@ -9,9 +9,9 @@ import {
   fillPrompt,
   fillDraftingPrompt,
   RESEARCH_COMPANY,
-  RESEARCH_FUNDING,
+  RESEARCH_ROLE,
   RESEARCH_TEAM,
-  RESEARCH_HIRING,
+  RESEARCH_TOOLING,
   RESEARCH_PERSON,
   RESEARCH_RECENT,
   RESEARCH_VERIFY,
@@ -632,7 +632,13 @@ const urlHost = (u) => {
 
 /* Discover the company's careers/jobs page, then scrape it WITH JavaScript
    rendered (onlyMainContent:false + waitFor, since job boards often live
-   outside "main" and load via AJAX). Returns sourced markdown or "". */
+   outside "main" and load via AJAX). Returns sourced markdown or "".
+
+   CURRENTLY UNWIRED, deliberately. It fed the old hiring pass, whose question
+   ("is this company hiring a PM?") belonged to the company ICP. It also cost
+   two serial Firecrawl round-trips before every lead's parallel block, even
+   when its output went unused. Kept because a careers page is still the best
+   evidence of a team's tooling stack, if the tooling pass ever wants it. */
 async function fetchCareersContent(company, companyUrl) {
   if (!FIRECRAWL_API_KEY || !company) return "";
   try {
@@ -672,28 +678,59 @@ async function fetchCareersContent(company, companyUrl) {
   }
 }
 
-/* Multi-step research: six targeted, source-tiered passes gathered in
-   parallel, then a verification + reconciliation + ICP-gate synthesis pass.
+/* The research passes, as data. Each `when` decides whether the pass is worth
+   a web search for THIS lead: anything the caller already told us (a title
+   from a connections export, a company blurb from a scout feed) is passed
+   through as a KNOWN FACT instead of being re-derived. A pasted CSV that
+   carries titles typically drops this from five passes to three.
+
+   `person` and `recent` always run: identity must be verified independently of
+   what the input claimed, and the hook is never in a CSV. */
+const RESEARCH_PASSES = [
+  { key: "person", template: RESEARCH_PERSON, when: () => true },
+  { key: "role", template: RESEARCH_ROLE, when: (i) => !i.leadTitle },
+  { key: "company", template: RESEARCH_COMPANY, when: (i) => !!i.company && !i.companyBlurb },
+  { key: "team", template: RESEARCH_TEAM, when: (i) => !i.teamSize },
+  { key: "tooling", template: RESEARCH_TOOLING, when: () => true },
+  { key: "recent", template: RESEARCH_RECENT, when: () => true },
+];
+
+/* Everything the caller asserted about this lead, handed to the verify pass as
+   claims. Tagged so rule 1 files them as [UNVERIFIED] rather than laundering
+   user input into evidence. */
+function buildKnownFacts(inputs) {
+  const supplied = [
+    ["Role/title", inputs.leadTitle],
+    ["Company", inputs.company],
+    ["Company description", inputs.companyBlurb],
+    ["Team size", inputs.teamSize],
+    ["LinkedIn", inputs.linkedinUrl],
+    ["Source", inputs.source],
+    ["Note supplied with the lead", inputs.note],
+  ].filter(([, v]) => v && String(v).trim());
+
+  if (supplied.length === 0) return "(none supplied with this lead)";
+  return supplied
+    .map(([label, v]) => `${label}: ${String(v).trim()} [UNVERIFIED — from input]`)
+    .join("\n");
+}
+
+/* Multi-step research: the applicable targeted, source-tiered passes gathered
+   in parallel, then a verification + reconciliation + fit-gate synthesis pass.
    Returns the final dossier string (consumed by the drafting step). */
 async function researchDossier(inputs) {
   const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
-  // Firecrawl: rendered careers page so the hiring pass sees client-side
-  // job boards search engines miss. Best-effort; "" when unavailable.
-  const careersContent = await fetchCareersContent(inputs.company, inputs.companyUrl);
-  const ctx = { ...inputs, today, careersContent };
+  const ctx = { ...inputs, today };
 
-  const passes = [
-    ["company", RESEARCH_COMPANY],
-    ["funding", RESEARCH_FUNDING],
-    ["team", RESEARCH_TEAM],
-    ["hiring", RESEARCH_HIRING],
-    ["person", RESEARCH_PERSON],
-    ["recent", RESEARCH_RECENT],
-  ];
+  const passes = RESEARCH_PASSES.filter((p) => p.when(inputs));
+  const skipped = RESEARCH_PASSES.filter((p) => !p.when(inputs)).map((p) => p.key);
+  if (skipped.length) {
+    console.log(`[research] ${inputs.leadName || "?"}: skipped ${skipped.join(", ")} (already known)`);
+  }
 
   // Passes are independent -> run concurrently for depth without serial latency.
   const results = await Promise.all(
-    passes.map(async ([key, template]) => {
+    passes.map(async ({ key, template }) => {
       const text = await runSearchPass(fillPrompt(template, ctx), `openai.research.${key}`);
       return [key, text];
     })
@@ -701,13 +738,14 @@ async function researchDossier(inputs) {
   const gathered = Object.fromEntries(results);
 
   const rawResearch = passes
-    .map(([key]) => `### ${key.toUpperCase()} PASS\n${gathered[key] || "(no output)"}`)
+    .map(({ key }) => `### ${key.toUpperCase()} PASS\n${gathered[key] || "(no output)"}`)
     .join("\n\n");
 
   // warmTie already = "Latest state | Notes: ..." (the human's claims).
   const verifySystem = fillPrompt(RESEARCH_VERIFY, {
     ...ctx,
     notesBlock: inputs.warmTie || "(none provided)",
+    knownFacts: buildKnownFacts(inputs),
     rawResearch,
   });
 
@@ -802,21 +840,31 @@ async function extractVerdict(dossier) {
   return JSON.parse((resp.output_text || "{}").trim());
 }
 
-/* Qualify one pasted lead end-to-end (research -> verdict), no drafting. */
+/* Qualify one pasted lead end-to-end (research -> verdict), no drafting.
+   Whatever the caller supplies is threaded through rather than discarded:
+   `role` is the single most decisive input for a person-level gate, and it
+   also lets researchDossier skip the role-verification pass. */
 async function qualifyOne(lead = {}) {
   const inputs = {
     leadName: lead.name || "",
-    leadTitle: "",
+    leadTitle: lead.role || "",
     company: lead.company || "",
+    companyBlurb: lead.companyBlurb || "",
+    teamSize: lead.teamSize || "",
     linkedinUrl: lead.linkedinUrl || "",
     companyUrl: lead.companyUrl || "",
-    warmTie: "", // no CRM notes for a pasted lead
+    source: lead.source || "",
+    note: lead.note || "",
+    // A pasted lead has no CRM row, but a caller (scout feed, CSV import,
+    // an operator pasting context) may still supply a relationship note.
+    warmTie: lead.warmTie || lead.note || "",
   };
   const dossier = await researchDossier(inputs);
   const structured = await extractVerdict(dossier);
   return {
     name: lead.name || "",
     company: lead.company || "",
+    role: lead.role || "",
     linkedinUrl: lead.linkedinUrl || "",
     verdict: structured.verdict,
     contactType: structured.contactType || "Unknown",
