@@ -49,6 +49,25 @@ const DATABASE_ID = process.env.NOTION_DATABASE_ID;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1";
 const FIRECRAWL_API_KEY = process.env.FIRECRAWL_API_KEY;
 const FIRECRAWL_BASE = "https://api.firecrawl.dev/v2";
+// Shared secret for /api/scout. That route spends money and writes to the
+// CRM, so unlike the rest of this server it is not open.
+const SCOUT_SECRET = process.env.SCOUT_SECRET;
+
+/* Bearer check for the scout route. Fails closed: with no secret configured
+   the route is disabled rather than public. */
+function requireScoutAuth(req, res) {
+  if (!SCOUT_SECRET) {
+    res.status(503).json({ error: "SCOUT_SECRET is not set; /api/scout is disabled" });
+    return false;
+  }
+  const header = req.get("authorization") || "";
+  const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
+  if (token !== SCOUT_SECRET) {
+    res.status(401).json({ error: "Unauthorized" });
+    return false;
+  }
+  return true;
+}
 
 // Lazy clients — construct on first use so the server boots even when keys
 // are unset, and each endpoint returns a clear error instead of crashing.
