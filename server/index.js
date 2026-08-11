@@ -9,14 +9,17 @@ import {
   fillPrompt,
   fillDraftingPrompt,
   RESEARCH_COMPANY,
-  RESEARCH_FUNDING,
+  RESEARCH_ROLE,
   RESEARCH_TEAM,
-  RESEARCH_HIRING,
+  RESEARCH_TOOLING,
   RESEARCH_PERSON,
   RESEARCH_RECENT,
   RESEARCH_VERIFY,
   EXPLAIN_EDIT_PROMPT,
 } from "./prompts.js";
+// Scout: isolated behind these two modules plus the /api/scout route.
+import { fetchRedditCandidates, prefilterCandidates } from "./scout-sources.js";
+import { CAPS, WRITE_VERDICTS, SCOUT_OWNER } from "./scout-config.js";
 
 // Prefer IPv4. Some hosts (e.g. Render) have flaky IPv6 egress that surfaces as
 // intermittent "Premature close" / "fetch failed" when calling api.notion.com.
@@ -49,6 +52,25 @@ const DATABASE_ID = process.env.NOTION_DATABASE_ID;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1";
 const FIRECRAWL_API_KEY = process.env.FIRECRAWL_API_KEY;
 const FIRECRAWL_BASE = "https://api.firecrawl.dev/v2";
+// Shared secret for /api/scout. That route spends money and writes to the
+// CRM, so unlike the rest of this server it is not open.
+const SCOUT_SECRET = process.env.SCOUT_SECRET;
+
+/* Bearer check for the scout route. Fails closed: with no secret configured
+   the route is disabled rather than public. */
+function requireScoutAuth(req, res) {
+  if (!SCOUT_SECRET) {
+    res.status(503).json({ error: "SCOUT_SECRET is not set; /api/scout is disabled" });
+    return false;
+  }
+  const header = req.get("authorization") || "";
+  const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
+  if (token !== SCOUT_SECRET) {
+    res.status(401).json({ error: "Unauthorized" });
+    return false;
+  }
+  return true;
+}
 
 // Lazy clients — construct on first use so the server boots even when keys
 // are unset, and each endpoint returns a clear error instead of crashing.
@@ -113,6 +135,33 @@ const PROPS = {
 /* ============================================================
    Notion schema cache + type-aware read / write helpers
    ============================================================ */
+/* Every row in the CRM, following the cursor. Notion caps a query at 100 per
+   page and signals more with has_more; the previous single-shot queries just
+   stopped at the first page, so a CRM past 100 rows silently showed a subset
+   and deduping against it would have missed everything beyond the cut.
+   `pageCap` is a runaway guard, not a limit anyone should hit. */
+async function queryAllPages(extra = {}, label = "all pages", pageCap = 50) {
+  const out = [];
+  let cursor;
+  for (let i = 0; i < pageCap; i++) {
+    const res = await withRetry(
+      () =>
+        getNotion().databases.query({
+          database_id: DATABASE_ID,
+          page_size: 100,
+          ...(cursor ? { start_cursor: cursor } : {}),
+          ...extra,
+        }),
+      `databases.query (${label})`
+    );
+    out.push(...(res.results || []));
+    if (!res.has_more || !res.next_cursor) return out;
+    cursor = res.next_cursor;
+  }
+  console.warn(`[notion] ${label}: hit the ${pageCap}-page cap, results may be incomplete`);
+  return out;
+}
+
 let dbSchemaCache = { at: 0, value: null };
 async function getDbSchema() {
   // Short TTL so column renames/additions are picked up without a restart.
@@ -443,6 +492,75 @@ function mapLead(page, index, schema) {
   };
 }
 
+/* ============================================================
+   Dedupe keys. A lead can be recognised three ways, and any one
+   of them matching means we already have this person.
+   ============================================================ */
+
+/* linkedin.com/in/jane-doe/?utm=x -> linkedin.com/in/jane-doe */
+function normalizeLinkedinKey(url) {
+  const s = String(url || "").trim();
+  if (!s) return "";
+  return s
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/^www\./, "")
+    .split(/[?#]/)[0]
+    .replace(/\/+$/, "");
+}
+
+const nameCompanyKey = (name, company) =>
+  `${String(name || "").trim().toLowerCase()}|${String(company || "").trim().toLowerCase()}`;
+
+const redditKey = (username) =>
+  `reddit:${String(username || "").trim().toLowerCase().replace(/^\/?u\//, "")}`;
+
+/* Every key that identifies `lead`. Used both to build the existing-key set
+   and to test a candidate against it. */
+function leadKeys({ name, company, linkedinUrl, redditUsername } = {}) {
+  const keys = [];
+  const li = normalizeLinkedinKey(linkedinUrl);
+  if (li) keys.push(li);
+  if (name || company) keys.push(nameCompanyKey(name, company));
+  if (redditUsername) keys.push(redditKey(redditUsername));
+  return keys;
+}
+
+/* Normalized keys for every lead already in the CRM. The scout checks
+   candidates against this before spending anything on scoring.
+
+   The reddit key is recovered from the Notes column: this CRM has no URL or
+   LinkedIn column, so Notes is where the scout writes "reddit:<user>". */
+async function getExistingLeadKeys() {
+  const schema = await getDbSchema();
+  const P = resolvePropMap(schema);
+  const pages = await queryAllPages({}, "dedupe keys");
+  const keys = new Set();
+
+  for (const page of pages) {
+    const props = page.properties || {};
+    const name = readProp(props, P.contact) || "";
+    const company = readProp(props, P.company) || titleValue(props) || "";
+    const notes = readProp(props, P.notes) || "";
+    const linkedinUrl = readProp(props, P.linkedin) || "";
+
+    // Notes may carry "LinkedIn: <url>" from an earlier add even when the
+    // column itself is absent, so look there too.
+    const fromNotes = notes.match(/https?:\/\/[^\s|]*linkedin\.com\/in\/[^\s|]*/i)?.[0] || "";
+    const reddit = notes.match(/reddit:([A-Za-z0-9_-]+)/i)?.[1] || "";
+
+    for (const k of leadKeys({
+      name,
+      company,
+      linkedinUrl: linkedinUrl || fromNotes,
+      redditUsername: reddit,
+    })) {
+      keys.add(k);
+    }
+  }
+  return keys;
+}
+
 /* Pull the fields the research prompt needs from a single page. */
 function readResearchInputs(page, schema) {
   const props = page.properties || {};
@@ -499,16 +617,11 @@ async function getAllEditPairs() {
     const P = resolvePropMap(schema);
     // Both columns must exist for there to be an edit signal to learn from.
     if (schema[P.aiDraft] && schema[P.draft]) {
-      const query = await withRetry(
-        () =>
-          getNotion().databases.query({
-            database_id: DATABASE_ID,
-            page_size: 50,
-            sorts: [{ timestamp: "last_edited_time", direction: "descending" }],
-          }),
-        "databases.query (edit examples)"
+      const results = await queryAllPages(
+        { sorts: [{ timestamp: "last_edited_time", direction: "descending" }] },
+        "edit examples"
       );
-      for (const page of query.results) {
+      for (const page of results) {
         const props = page.properties || {};
         const aiDraft = readProp(props, P.aiDraft);
         const humanEdited = readProp(props, P.draft);
@@ -567,18 +680,24 @@ async function createResponseText(params, label) {
 }
 
 /* One targeted research pass: a web_search call driven by a system prompt. */
-async function runSearchPass(systemPrompt, label) {
+/* `web: false` drops the search tool. Used for pseudonymous leads, where the
+   only identifier is a handle: with the tool attached the model spends
+   minutes searching for "u/Easy-Marionberry-399", finds nothing (as it must),
+   and searches again. Measured at ~340s of a 400s run for a single lead. The
+   post is the evidence, so there is nothing out there to look for. */
+async function runSearchPass(systemPrompt, label, { web = true } = {}) {
   return createResponseText(
     {
       model: OPENAI_MODEL,
       temperature: 0.2,
-      tools: [{ type: "web_search" }],
+      ...(web ? { tools: [{ type: "web_search" }] } : {}),
       input: [
         { role: "system", content: systemPrompt },
         {
           role: "user",
-          content:
-            "Run this research pass now using web search. Return only the specified structured output, with a source URL on every fact line.",
+          content: web
+            ? "Run this research pass now using web search. Return only the specified structured output, with a source URL on every fact line."
+            : "Produce the dossier now from the material you were given. Do not claim any fact that is not in that material. Return only the specified structured output.",
         },
       ],
     },
@@ -632,7 +751,13 @@ const urlHost = (u) => {
 
 /* Discover the company's careers/jobs page, then scrape it WITH JavaScript
    rendered (onlyMainContent:false + waitFor, since job boards often live
-   outside "main" and load via AJAX). Returns sourced markdown or "". */
+   outside "main" and load via AJAX). Returns sourced markdown or "".
+
+   CURRENTLY UNWIRED, deliberately. It fed the old hiring pass, whose question
+   ("is this company hiring a PM?") belonged to the company ICP. It also cost
+   two serial Firecrawl round-trips before every lead's parallel block, even
+   when its output went unused. Kept because a careers page is still the best
+   evidence of a team's tooling stack, if the tooling pass ever wants it. */
 async function fetchCareersContent(company, companyUrl) {
   if (!FIRECRAWL_API_KEY || !company) return "";
   try {
@@ -672,46 +797,124 @@ async function fetchCareersContent(company, companyUrl) {
   }
 }
 
-/* Multi-step research: six targeted, source-tiered passes gathered in
-   parallel, then a verification + reconciliation + ICP-gate synthesis pass.
+/* The research passes, as data. Each `when` decides whether the pass is worth
+   a web search for THIS lead: anything the caller already told us (a title
+   from a connections export, a company blurb from a scout feed) is passed
+   through as a KNOWN FACT instead of being re-derived. A pasted CSV that
+   carries titles typically drops this from five passes to three.
+
+   `person` and `recent` always run: identity must be verified independently of
+   what the input claimed, and the hook is never in a CSV. */
+/* Lead sources whose "name" is a handle, not a person. Searching the web for
+   u/Easy-Marionberry-399 finds nothing, and finding nothing is not evidence
+   of a bad lead — it is what a pseudonym looks like. */
+const PSEUDONYMOUS_SOURCES = new Set(["reddit"]);
+const isPseudonymous = (i) => PSEUDONYMOUS_SOURCES.has(String(i?.leadSource || "").toLowerCase());
+
+const RESEARCH_PASSES = [
+  // Identity passes are pointless for a handle: the post is the evidence.
+  { key: "person", template: RESEARCH_PERSON, when: (i) => !isPseudonymous(i) },
+  { key: "role", template: RESEARCH_ROLE, when: (i) => !isPseudonymous(i) && !i.leadTitle },
+  {
+    key: "company",
+    template: RESEARCH_COMPANY,
+    when: (i) => !isPseudonymous(i) && !!i.company && !i.companyBlurb,
+  },
+  { key: "team", template: RESEARCH_TEAM, when: (i) => !isPseudonymous(i) && !i.teamSize },
+  { key: "tooling", template: RESEARCH_TOOLING, when: (i) => !isPseudonymous(i) },
+  { key: "recent", template: RESEARCH_RECENT, when: (i) => !isPseudonymous(i) },
+];
+
+/* Everything the caller asserted about this lead, handed to the verify pass as
+   claims. Tagged so rule 1 files them as [UNVERIFIED] rather than laundering
+   user input into evidence.
+
+   For a pseudonymous lead this is the WHOLE evidence base, so the post goes in
+   verbatim: the gate reads "my team of 8" and "as a scrum master" straight out
+   of it. */
+function buildKnownFacts(inputs) {
+  const supplied = [
+    ["Role/title", inputs.leadTitle],
+    ["Company", inputs.company],
+    ["Company description", inputs.companyBlurb],
+    ["Team size", inputs.teamSize],
+    ["LinkedIn", inputs.linkedinUrl],
+    ["Source", inputs.source],
+    ["Note supplied with the lead", inputs.note],
+  ].filter(([, v]) => v && String(v).trim());
+
+  const lines = supplied.map(
+    ([label, v]) => `${label}: ${String(v).trim()} [UNVERIFIED — from input]`
+  );
+
+  if (isPseudonymous(inputs) && inputs.post) {
+    const p = inputs.post;
+    lines.push(
+      "",
+      "SOURCE POST (this is the primary evidence for a pseudonymous lead):",
+      `Platform: reddit, r/${p.subreddit || "?"} [SELF-STATED — from source post]`,
+      `Handle: u/${inputs.leadName || "?"} [SELF-STATED — from source post]`,
+      p.flair ? `Flair: ${p.flair} [SELF-STATED — from source post]` : "",
+      `Posted: ${p.createdUtc ? new Date(p.createdUtc * 1000).toISOString().slice(0, 10) : "unknown"}`,
+      `Permalink: ${p.permalink || "unknown"}`,
+      `Title: ${p.title || ""} [SELF-STATED — from source post]`,
+      "Body:",
+      `${p.selftext || "(no body text)"} [SELF-STATED — from source post]`
+    );
+  }
+
+  const body = lines.filter((l) => l !== "").join("\n");
+  return body || "(none supplied with this lead)";
+}
+
+/* Multi-step research: the applicable targeted, source-tiered passes gathered
+   in parallel, then a verification + reconciliation + fit-gate synthesis pass.
    Returns the final dossier string (consumed by the drafting step). */
 async function researchDossier(inputs) {
   const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
-  // Firecrawl: rendered careers page so the hiring pass sees client-side
-  // job boards search engines miss. Best-effort; "" when unavailable.
-  const careersContent = await fetchCareersContent(inputs.company, inputs.companyUrl);
-  const ctx = { ...inputs, today, careersContent };
+  const ctx = { ...inputs, today };
 
-  const passes = [
-    ["company", RESEARCH_COMPANY],
-    ["funding", RESEARCH_FUNDING],
-    ["team", RESEARCH_TEAM],
-    ["hiring", RESEARCH_HIRING],
-    ["person", RESEARCH_PERSON],
-    ["recent", RESEARCH_RECENT],
-  ];
+  const passes = RESEARCH_PASSES.filter((p) => p.when(inputs));
+  const skipped = RESEARCH_PASSES.filter((p) => !p.when(inputs)).map((p) => p.key);
+  if (skipped.length) {
+    const why = isPseudonymous(inputs) ? "pseudonymous lead" : "already known";
+    console.log(`[research] ${inputs.leadName || "?"}: skipped ${skipped.join(", ")} (${why})`);
+  }
 
   // Passes are independent -> run concurrently for depth without serial latency.
   const results = await Promise.all(
-    passes.map(async ([key, template]) => {
+    passes.map(async ({ key, template }) => {
       const text = await runSearchPass(fillPrompt(template, ctx), `openai.research.${key}`);
       return [key, text];
     })
   );
   const gathered = Object.fromEntries(results);
 
-  const rawResearch = passes
-    .map(([key]) => `### ${key.toUpperCase()} PASS\n${gathered[key] || "(no output)"}`)
-    .join("\n\n");
+  // Every web pass is keyed on a real identity, so a pseudonymous lead runs
+  // none of them. Say that explicitly rather than handing the verify pass an
+  // empty section it might read as "research came back empty" (which would
+  // look like a dead lead rather than a lead with a different evidence base).
+  const rawResearch = passes.length
+    ? passes
+        .map(({ key }) => `### ${key.toUpperCase()} PASS\n${gathered[key] || "(no output)"}`)
+        .join("\n\n")
+    : "(No web research passes were run. This is a PSEUDONYMOUS lead: the handle is not " +
+      "a real name, so identity lookups would return nothing and that absence would mean " +
+      "nothing. The SOURCE POST under KNOWN FACTS is the evidence base for this lead.)";
 
   // warmTie already = "Latest state | Notes: ..." (the human's claims).
   const verifySystem = fillPrompt(RESEARCH_VERIFY, {
     ...ctx,
     notesBlock: inputs.warmTie || "(none provided)",
+    knownFacts: buildKnownFacts(inputs),
     rawResearch,
   });
 
-  return runSearchPass(verifySystem, "openai.research.verify");
+  // No web search for a pseudonymous lead: there is no real identity to look
+  // up, and letting it try costs minutes per lead for guaranteed nothing.
+  return runSearchPass(verifySystem, "openai.research.verify", {
+    web: !isPseudonymous(inputs),
+  });
 }
 
 /* ============================================================
@@ -730,7 +933,7 @@ async function extractVerdict(dossier) {
           {
             role: "system",
             content:
-              "Extract structured fields from this Agilow ICP research dossier. Use ONLY what the dossier states — do not add, infer, or change any fact. Copy the ICP FIT verdict, CONTACT TYPE, SUGGESTED INTENT, and the A-E checks exactly as written.",
+              "Extract structured fields from this Agilow person-fit research dossier. Use ONLY what the dossier states — do not add, infer, or change any fact. Copy the ICP FIT verdict, CONTACT TYPE, SUGGESTED INTENT, and the A-E checks exactly as written.",
           },
           { role: "user", content: `DOSSIER:\n${dossier}\n\nReturn the structured JSON.` },
         ],
@@ -747,13 +950,15 @@ async function extractVerdict(dossier) {
                   type: "string",
                   enum: ["Strong", "Moderate", "Moderate (unverified)", "Weak"],
                 },
+                // Must stay in lockstep with the CONTACT TYPE list in
+                // RESEARCH_VERIFY and with contactTypeClass() in src/Hub.jsx.
                 contactType: {
                   type: "string",
                   enum: [
-                    "ICP founder/exec",
+                    "Ceremony owner",
+                    "Eng leader",
                     "Connector",
-                    "Engineer/IC",
-                    "Adjacent",
+                    "IC",
                     "Not relevant",
                     "Unknown",
                   ],
@@ -773,18 +978,21 @@ async function extractVerdict(dossier) {
                     required: ["criterion", "value", "evidence"],
                   },
                 },
+                // Mirrored by KEY_FACT_LABELS in src/Hub.jsx. Every field is
+                // `required` under strict mode, so the model emits "" when a
+                // fact is absent rather than omitting the key.
                 keyFacts: {
                   type: "object",
                   additionalProperties: false,
                   properties: {
+                    role: { type: "string" },
                     company: { type: "string" },
-                    funding: { type: "string" },
-                    headcount: { type: "string" },
-                    stage: { type: "string" },
-                    hiring: { type: "string" },
+                    teamSize: { type: "string" },
+                    tooling: { type: "string" },
+                    painSignal: { type: "string" },
                     recentActivity: { type: "string" },
                   },
-                  required: ["company", "funding", "headcount", "stage", "hiring", "recentActivity"],
+                  required: ["role", "company", "teamSize", "tooling", "painSignal", "recentActivity"],
                 },
               },
               required: ["verdict", "contactType", "suggestedIntent", "reasoning", "checks", "keyFacts"],
@@ -797,22 +1005,38 @@ async function extractVerdict(dossier) {
   return JSON.parse((resp.output_text || "{}").trim());
 }
 
-/* Qualify one pasted lead end-to-end (research -> verdict), no drafting. */
+/* Qualify one pasted lead end-to-end (research -> verdict), no drafting.
+   Whatever the caller supplies is threaded through rather than discarded:
+   `role` is the single most decisive input for a person-level gate, and it
+   also lets researchDossier skip the role-verification pass. */
 async function qualifyOne(lead = {}) {
   const inputs = {
     leadName: lead.name || "",
-    leadTitle: "",
+    leadTitle: lead.role || "",
     company: lead.company || "",
+    companyBlurb: lead.companyBlurb || "",
+    teamSize: lead.teamSize || "",
     linkedinUrl: lead.linkedinUrl || "",
     companyUrl: lead.companyUrl || "",
-    warmTie: "", // no CRM notes for a pasted lead
+    source: lead.source || "",
+    note: lead.note || "",
+    // "reddit" switches the engine into pseudonymous mode: no web passes, the
+    // source post becomes the evidence base, and the identity tripwire stands
+    // down. Absent or "linkedin"/"csv"/"" means the normal real-name path.
+    leadSource: lead.leadSource || "",
+    post: lead.post || null,
+    // A pasted lead has no CRM row, but a caller (scout feed, CSV import,
+    // an operator pasting context) may still supply a relationship note.
+    warmTie: lead.warmTie || lead.note || "",
   };
   const dossier = await researchDossier(inputs);
   const structured = await extractVerdict(dossier);
   return {
     name: lead.name || "",
     company: lead.company || "",
+    role: lead.role || "",
     linkedinUrl: lead.linkedinUrl || "",
+    leadSource: inputs.leadSource,
     verdict: structured.verdict,
     contactType: structured.contactType || "Unknown",
     suggestedIntent: structured.suggestedIntent || "",
@@ -878,7 +1102,9 @@ app.use(
       : true,
   })
 );
-app.use(express.json({ limit: "1mb" }));
+// 5mb: a LinkedIn connections export of a few thousand rows exceeds the old
+// 1mb default, and the failure mode was a bare 413 the UI never surfaced.
+app.use(express.json({ limit: "5mb" }));
 
 app.get("/api/health", (_req, res) => res.json({ ok: true }));
 
@@ -893,11 +1119,8 @@ app.get("/api/leads", async (_req, res) => {
   try {
     if (!DATABASE_ID) throw new Error("NOTION_DATABASE_ID is not set");
     const schema = await getDbSchema();
-    const query = await withRetry(
-      () => getNotion().databases.query({ database_id: DATABASE_ID, page_size: 100 }),
-      "databases.query"
-    );
-    const leads = query.results.map((page, i) => mapLead(page, i, schema));
+    const pages = await queryAllPages({}, "leads");
+    const leads = pages.map((page, i) => mapLead(page, i, schema));
     res.json(leads);
   } catch (err) {
     console.error("GET /api/leads failed:", err?.message || err);
@@ -1058,6 +1281,8 @@ app.post("/api/qualify", async (req, res) => {
   try {
     if (Array.isArray(body.leads)) {
       const leads = body.leads.slice(0, QUALIFY_BATCH_MAX);
+      // Report the drop rather than silently scoring a prefix.
+      const dropped = body.leads.length - leads.length;
       if (leads.length === 0) throw new Error("leads array is empty");
       const results = await mapLimit(leads, QUALIFY_CONCURRENCY, async (lead) => {
         try {
@@ -1070,7 +1295,7 @@ app.post("/api/qualify", async (req, res) => {
           };
         }
       });
-      return res.json({ results });
+      return res.json({ results, dropped, batchMax: QUALIFY_BATCH_MAX });
     }
 
     if (!body.name && !body.company) throw new Error("name or company is required");
@@ -1084,79 +1309,234 @@ app.post("/api/qualify", async (req, res) => {
 
 /* 5) POST /api/add-to-crm { name, company, linkedinUrl?, companyUrl?, verdict?, dossier?, owner? }
    Creates a new page in the Notion CRM. Never auto-creates columns. */
+/* Verdict -> the CRM's "Fit" select.
+   The verdict vocabulary is Strong / Moderate / Moderate (unverified) / Weak,
+   but the live Notion "Fit" column is a select with exactly three options:
+   Strong | Medium | Weak. Notion auto-creates select options on write, so
+   returning "Moderate" here would silently add a FOURTH option and split the
+   same leads across two values in every existing view and filter.
+   So the mapping stays Medium, deliberately: this is the one place the two
+   vocabularies meet, and the CRM's wins. Rename the Notion option to Moderate
+   and this line follows — not before. */
 function fitFromVerdict(verdict) {
   if (!verdict) return null;
   if (/strong/i.test(verdict)) return "Strong";
   if (/weak/i.test(verdict)) return "Weak";
-  return "Medium"; // Moderate / Moderate (unverified)
+  return "Medium"; // Moderate / Moderate (unverified) -> the CRM's "Medium"
+}
+
+/* Create one CRM row. The single writer: /api/add-to-crm and the scout both
+   go through here, so a change to what a new lead looks like is one edit.
+
+   `note` lets a caller append its own provenance to the Notes column, which
+   is where the scout puts its "reddit:<user>" dedupe key and the permalink —
+   this CRM has no URL column to put them in. Returns the new page id. */
+async function addLeadToCrm(lead = {}) {
+  const {
+    name,
+    company,
+    linkedinUrl,
+    companyUrl,
+    verdict,
+    dossier,
+    owner,
+    note,
+    addedFrom = "the Qualify screen",
+  } = lead;
+
+  if (!name && !company) throw new Error("name or company is required");
+  const schema = await getDbSchema();
+
+  const noteParts = [];
+  if (verdict) noteParts.push(`ICP verdict: ${verdict}`);
+  if (linkedinUrl) noteParts.push(`LinkedIn: ${linkedinUrl}`);
+  if (note) noteParts.push(note);
+  noteParts.push(`Added from ${addedFrom}.`);
+
+  const entries = {
+    company: company || name,
+    contact: name || "",
+    notes: noteParts.join(" | "),
+  };
+  const fit = fitFromVerdict(verdict);
+  if (fit) entries.icp = fit;
+  if (dossier) entries.research = dossier;
+  if (linkedinUrl) entries.linkedin = linkedinUrl;
+  if (companyUrl) entries.companyUrl = companyUrl;
+
+  // Persist the owner so the new row reflects who this lead belongs to.
+  if (typeof owner === "string" && owner.trim()) {
+    entries.owner = owner.trim();
+  }
+
+  // Best-effort status tag for Notion views. If the Status column has no
+  // option with this exact name, buildWrite() skips it gracefully.
+  entries.status = "Currently researching";
+
+  const properties = writeProps(schema, entries);
+
+  const page = await withRetry(
+    () => getNotion().pages.create({ parent: { database_id: DATABASE_ID }, properties }),
+    "pages.create"
+  );
+
+  // Dossier goes in the page BODY as well (this CRM has no Research column).
+  if (dossier) {
+    try {
+      await writeDossierToBody(page.id, dossier);
+    } catch (e) {
+      console.warn("dossier body write failed (continuing):", e?.message || e);
+    }
+  }
+
+  return page.id;
 }
 
 app.post("/api/add-to-crm", async (req, res) => {
-  const { name, company, linkedinUrl, companyUrl, verdict, dossier, owner } = req.body || {};
   try {
-    if (!name && !company) throw new Error("name or company is required");
-    const schema = await getDbSchema();
-
-    const noteParts = [];
-    if (verdict) noteParts.push(`ICP verdict: ${verdict}`);
-    if (linkedinUrl) noteParts.push(`LinkedIn: ${linkedinUrl}`);
-    noteParts.push("Added from the Qualify screen.");
-
-    const entries = {
-      company: company || name,
-      contact: name || "",
-      notes: noteParts.join(" | "),
-    };
-    const fit = fitFromVerdict(verdict);
-    if (fit) entries.icp = fit;
-    if (dossier) entries.research = dossier;
-    if (linkedinUrl) entries.linkedin = linkedinUrl;
-    if (companyUrl) entries.companyUrl = companyUrl;
-
-    // If the Qualify screen was "sending as" a specific owner, persist that so
-    // the new CRM row immediately reflects who this lead is owned by.
-    if (typeof owner === "string" && owner.trim()) {
-      entries.owner = owner.trim();
-    }
-
-    // Mark freshly-qualified leads as "Currently researching" in the Status
-    // column when they are first added from the Qualify screen, so Notion
-    // views can filter on that tag. (Write is best-effort: if the Status
-    // column doesn't have an option with this exact name, buildWrite() will
-    // skip it gracefully.)
-    entries.status = "Currently researching";
-
-    const properties = writeProps(schema, entries);
-
-    const page = await withRetry(
-      () => getNotion().pages.create({ parent: { database_id: DATABASE_ID }, properties }),
-      "pages.create"
-    );
-
-    // If a dossier was passed (from Qualify), write it into the new page's body.
-    if (dossier) {
-      try {
-        await writeDossierToBody(page.id, dossier);
-      } catch (e) {
-        console.warn("dossier body write failed (continuing):", e?.message || e);
-      }
-    }
-
-    res.json({ ok: true, notionPageId: page.id });
+    const notionPageId = await addLeadToCrm(req.body || {});
+    res.json({ ok: true, notionPageId });
   } catch (err) {
     console.error("POST /api/add-to-crm failed:", err?.message || err);
     res.status(500).json({ error: err?.message || "Add to CRM failed" });
   }
 });
 
-/* 6) POST /api/parse-leads { text } -> { leads: [{name, company, linkedinUrl, companyUrl}] }
-   LLM-cleans messy pasted input: routes URLs to the right field (so a LinkedIn
-   link never lands in the company name), extracts names/companies, and derives
-   a name from a profile slug when no name is given. */
+/* ============================================================
+   Lead parsing: a deterministic CSV path and an LLM path.
+
+   A LinkedIn connections export is a solved parsing problem — it does not
+   need a model, and running one over it costs money, truncates at whatever
+   character cap we pick, and can hallucinate rows. So CSV is sniffed and
+   parsed here; only genuinely messy paste goes to the LLM.
+   ============================================================ */
+
+/* One CSV line -> fields. Handles quoted fields containing commas and
+   doubled "" escapes, which real exports do produce (company names). */
+function splitCsvLine(line) {
+  const out = [];
+  let cur = "";
+  let quoted = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (quoted) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') {
+          cur += '"';
+          i++;
+        } else quoted = false;
+      } else cur += ch;
+    } else if (ch === '"') {
+      quoted = true;
+    } else if (ch === ",") {
+      out.push(cur);
+      cur = "";
+    } else cur += ch;
+  }
+  out.push(cur);
+  return out.map((s) => s.trim());
+}
+
+/* Header aliases -> canonical field. Covers LinkedIn's Connections.csv and
+   the common Sales Navigator / CRM export spellings. */
+const CSV_ALIASES = {
+  firstName: ["first name", "firstname", "given name"],
+  lastName: ["last name", "lastname", "surname", "family name"],
+  name: ["name", "full name", "contact name", "person"],
+  company: ["company", "company name", "organization", "organisation", "employer", "account name"],
+  role: ["position", "title", "job title", "role", "current title", "headline"],
+  linkedinUrl: ["url", "profile url", "linkedin", "linkedin url", "person linkedin url", "profile"],
+  companyUrl: ["website", "company website", "company url", "domain"],
+  connectedOn: ["connected on", "connection date", "date connected"],
+};
+
+/* Detect + parse a CSV export. Returns { leads, rows } or null when the text
+   is not a CSV we recognise (caller then falls through to the LLM path).
+
+   LinkedIn prefixes the real header with a "Notes:" preamble, so the header
+   is located by content rather than by a fixed line offset — the preamble has
+   changed length before and will again. */
+function parseCsvLeads(text) {
+  const lines = String(text).split(/\r?\n/);
+  let headerIdx = -1;
+  let cols = null;
+
+  for (let i = 0; i < Math.min(lines.length, 20); i++) {
+    if (!lines[i].includes(",")) continue;
+    const cells = splitCsvLine(lines[i]).map((c) => c.toLowerCase());
+    const find = (key) => cells.findIndex((c) => CSV_ALIASES[key].includes(c));
+    const idx = Object.fromEntries(Object.keys(CSV_ALIASES).map((k) => [k, find(k)]));
+    const hasName = idx.firstName >= 0 || idx.name >= 0;
+    const hasContext = idx.company >= 0 || idx.role >= 0 || idx.linkedinUrl >= 0;
+    if (hasName && hasContext) {
+      headerIdx = i;
+      cols = idx;
+      break;
+    }
+  }
+  if (headerIdx === -1) return null;
+
+  const at = (cells, i) => (i >= 0 && i < cells.length ? cells[i] : "");
+  const leads = [];
+  let rows = 0;
+
+  for (let i = headerIdx + 1; i < lines.length; i++) {
+    if (!lines[i].trim()) continue;
+    rows++;
+    const cells = splitCsvLine(lines[i]);
+    const name =
+      cols.name >= 0
+        ? at(cells, cols.name)
+        : [at(cells, cols.firstName), at(cells, cols.lastName)].filter(Boolean).join(" ");
+    const company = at(cells, cols.company);
+    const linkedinUrl = at(cells, cols.linkedinUrl);
+    if (!name && !company && !linkedinUrl) continue;
+
+    const connectedOn = at(cells, cols.connectedOn);
+    leads.push({
+      name,
+      company,
+      role: at(cells, cols.role),
+      linkedinUrl: /^https?:\/\//i.test(linkedinUrl) ? linkedinUrl : "",
+      companyUrl: at(cells, cols.companyUrl),
+      source: "csv-import",
+      note: connectedOn ? `Connected ${connectedOn}` : "",
+    });
+  }
+
+  return { leads, rows };
+}
+
+/* Cap on the LLM path only. The CSV path has no cap — it never reaches a
+   model, so there is nothing to truncate for. */
+const PARSE_LLM_CHAR_CAP = 20000;
+
+/* 6) POST /api/parse-leads { text }
+   -> { leads: [{name, company, role, linkedinUrl, companyUrl, source, note}],
+        mode, truncated }
+   CSV exports are parsed deterministically. Anything else is LLM-cleaned:
+   URLs routed to the right field (so a LinkedIn link never lands in the
+   company name), names/companies/titles extracted, and a name derived from a
+   profile slug when none is given. */
 app.post("/api/parse-leads", async (req, res) => {
   const { text } = req.body || {};
   try {
     if (typeof text !== "string" || !text.trim()) throw new Error("text is required");
+
+    // Deterministic path: a recognised CSV export never reaches the model.
+    const csv = parseCsvLeads(text);
+    if (csv) {
+      console.log(`[parse-leads] csv: ${csv.leads.length} leads from ${csv.rows} rows`);
+      return res.json({
+        leads: csv.leads,
+        mode: "csv",
+        truncated: false,
+        rows: csv.rows,
+        skipped: csv.rows - csv.leads.length,
+      });
+    }
+
+    const truncated = text.length > PARSE_LLM_CHAR_CAP;
     const resp = await withRetry(
       () =>
         getOpenAI().responses.create({
@@ -1166,16 +1546,28 @@ app.post("/api/parse-leads", async (req, res) => {
             {
               role: "system",
               content:
-                "You clean up a pasted list of sales leads into structured rows. The input is messy: " +
-                "each lead may be on one line as 'Name, Company', or may include a LinkedIn profile URL " +
-                "(linkedin.com/in/...) and/or a company website URL anywhere in the line. " +
-                "RULES: Put the person's full name in `name`, the company in `company`, a LinkedIn profile " +
-                "URL in `linkedinUrl`, and a company website URL in `companyUrl`. NEVER put a URL in `name` " +
-                "or `company`. If a line is only a LinkedIn URL with no name, derive a plausible human name " +
-                "from the profile slug (e.g. /in/jane-doe-123 -> 'Jane Doe'); leave company empty if unknown. " +
-                "If a value is genuinely unknown, use an empty string. Return one row per distinct lead.",
+                "You clean up a pasted list of sales leads into structured rows. The input is messy. A lead " +
+                "may be one line of 'Name, Title, Company'; may include a LinkedIn profile URL " +
+                "(linkedin.com/in/...) and/or a company website URL anywhere in the line; or may be a block " +
+                "copied straight off a LinkedIn profile, a Sales Navigator result, or a search-results page. " +
+                "Those pasted blocks put the name on its own line, then a headline like " +
+                "'Engineering Manager at Acme | ex-Google', then noise such as '3rd', '500+ connections', " +
+                "'Greater Boston Area', 'Message', 'Connect', or a shared-connections line. " +
+                "RULES: Put the person's full name in `name`, their job title in `role`, the company in " +
+                "`company`, a LinkedIn profile URL in `linkedinUrl`, and a company website URL in " +
+                "`companyUrl`. Split a headline like 'Scrum Master at Zeta' into role='Scrum Master' and " +
+                "company='Zeta'. NEVER put a URL, a degree symbol, a connection count, or a location in " +
+                "`name`, `role`, or `company`. Drop UI noise lines entirely — they are not leads. If a line " +
+                "is only a LinkedIn URL with no name, derive a plausible human name from the profile slug " +
+                "(e.g. /in/jane-doe-123 -> 'Jane Doe'); leave company empty if unknown. Put anything that " +
+                "reads like a personal note or context about the lead in `note`, and where the lead came " +
+                "from in `source` if the input says so. If a value is genuinely unknown, use an empty " +
+                "string. Return one row per distinct PERSON, no duplicates.",
             },
-            { role: "user", content: `Parse these leads:\n\n${text.slice(0, 8000)}` },
+            {
+              role: "user",
+              content: `Parse these leads:\n\n${text.slice(0, PARSE_LLM_CHAR_CAP)}`,
+            },
           ],
           text: {
             format: {
@@ -1194,10 +1586,23 @@ app.post("/api/parse-leads", async (req, res) => {
                       properties: {
                         name: { type: "string" },
                         company: { type: "string" },
+                        role: { type: "string" },
                         linkedinUrl: { type: "string" },
                         companyUrl: { type: "string" },
+                        source: { type: "string" },
+                        note: { type: "string" },
                       },
-                      required: ["name", "company", "linkedinUrl", "companyUrl"],
+                      // strict mode requires every property listed; the model
+                      // emits "" for anything the input didn't supply.
+                      required: [
+                        "name",
+                        "company",
+                        "role",
+                        "linkedinUrl",
+                        "companyUrl",
+                        "source",
+                        "note",
+                      ],
                     },
                   },
                 },
@@ -1209,14 +1614,184 @@ app.post("/api/parse-leads", async (req, res) => {
       "openai.parse-leads"
     );
     const parsed = JSON.parse((resp.output_text || "{}").trim());
-    res.json({ leads: Array.isArray(parsed.leads) ? parsed.leads : [] });
+    const leads = Array.isArray(parsed.leads) ? parsed.leads : [];
+    if (truncated) {
+      console.warn(
+        `[parse-leads] llm: input ${text.length} chars truncated to ${PARSE_LLM_CHAR_CAP}`
+      );
+    }
+    res.json({ leads, mode: "llm", truncated, chars: text.length });
   } catch (err) {
     console.error("POST /api/parse-leads failed:", err?.message || err);
     res.status(500).json({ error: err?.message || "Parse failed" });
   }
 });
 
-/* 7) POST /api/photo { linkedinUrl } -> { photoUrl }
+/* ============================================================
+   7) POST /api/scout — the automated sweep.
+
+   Bearer-authed. Fetch Reddit, triage cheaply, drop anyone already in
+   the CRM, score what is left through the same qualifyOne the Qualify
+   screen uses, write the ones that clear the threshold.
+
+   Writes happen per lead as it qualifies, never batched at the end. The
+   caller is a GitHub Actions curl against a free Render instance that
+   can be killed mid-flight, and a killed run should cost us the unscored
+   tail, not everything it had already earned.
+   ============================================================ */
+app.post("/api/scout", async (req, res) => {
+  if (!requireScoutAuth(req, res)) return;
+
+  const startedAt = Date.now();
+  const { sources, since, limit, dryRun = false } = req.body || {};
+  const budgetMs = CAPS.budgetMs;
+  const skipped = [];
+  const written = [];
+  let partial = false;
+
+  const counts = { scanned: 0, prefiltered: 0, deduped: 0, scored: 0, written: 0 };
+
+  try {
+    // 1. Fetch. `sources` narrows the subreddit list for a cheap test run.
+    const sinceUnix =
+      typeof since === "number"
+        ? since
+        : Math.floor(Date.now() / 1000) - CAPS.sinceDays * 86400;
+    // Fetch gets at most 40% of the run budget. Reddit's rate-limit backoff
+    // is unbounded in principle, and a run that fetches beautifully and then
+    // scores nothing is a wasted run.
+    const candidates = await fetchRedditCandidates({
+      subreddits: Array.isArray(sources) && sources.length ? sources : undefined,
+      since: sinceUnix,
+      deadline: startedAt + budgetMs * 0.4,
+    });
+    counts.scanned = candidates.length;
+    if (Date.now() - startedAt > budgetMs * 0.4) {
+      partial = true;
+      skipped.push("fetch phase hit its share of the run budget; sweep was cut short");
+    }
+
+    // 2. Triage before spending anything per-lead.
+    const relevant = await prefilterCandidates(candidates, getOpenAI());
+    counts.prefiltered = relevant.length;
+
+    // 3. Dedupe: against the CRM, and against this run.
+    const existing = await getExistingLeadKeys();
+    const seenThisRun = new Set();
+    const fresh = [];
+    for (const c of relevant) {
+      const keys = leadKeys({ name: c.author, redditUsername: c.author });
+      if (keys.some((k) => existing.has(k))) {
+        skipped.push(`${c.author}: already in CRM`);
+        continue;
+      }
+      if (keys.some((k) => seenThisRun.has(k))) {
+        skipped.push(`${c.author}: duplicate within this run`);
+        continue;
+      }
+      keys.forEach((k) => seenThisRun.add(k));
+      fresh.push(c);
+    }
+    counts.deduped = fresh.length;
+
+    // 4. Cap. `limit` is the manual override used for a small live test.
+    const cap = Math.min(
+      typeof limit === "number" && limit > 0 ? limit : CAPS.maxScoredPerRun,
+      CAPS.maxCandidatesPerRun,
+      CAPS.maxScoredPerRun
+    );
+    const toScore = fresh.slice(0, cap);
+    if (fresh.length > toScore.length) {
+      skipped.push(`${fresh.length - toScore.length} over the per-run cap of ${cap}`);
+    }
+
+    // 5. Score, and write each winner as it lands.
+    await mapLimit(toScore, CAPS.scoreConcurrency, async (post) => {
+      if (Date.now() - startedAt > budgetMs) {
+        partial = true;
+        skipped.push(`${post.author}: run budget exhausted`);
+        return;
+      }
+      try {
+        const result = await qualifyOne({
+          name: post.author,
+          leadSource: "reddit",
+          post,
+          source: `reddit r/${post.subreddit}`,
+          note: `${post.permalink} — ${post.title}`,
+        });
+        counts.scored++;
+
+        if (!WRITE_VERDICTS.includes(result.verdict)) {
+          skipped.push(`${post.author}: ${result.verdict}`);
+          return;
+        }
+
+        const row = {
+          username: post.author,
+          verdict: result.verdict,
+          contactType: result.contactType,
+          reasoning: result.reasoning,
+          permalink: post.permalink,
+          subreddit: post.subreddit,
+          title: post.title,
+          role: result.keyFacts?.role || "",
+        };
+
+        if (dryRun) {
+          written.push({ ...row, dryRun: true });
+          return;
+        }
+
+        // This CRM has no URL column, so the permalink and the dedupe key
+        // both live in Notes. getExistingLeadKeys reads them back out.
+        const notionPageId = await addLeadToCrm({
+          name: post.author,
+          // The title column is "Company Name" and a Reddit lead has no
+          // company. Use the source, which is short and groups in a view.
+          // The role sentence from keyFacts is prose, not a title: it belongs
+          // in the dossier, not in the column people scan.
+          company: `r/${post.subreddit} · Reddit`,
+          verdict: result.verdict,
+          dossier: result.dossier,
+          owner: SCOUT_OWNER,
+          note: `${redditKey(post.author)} | ${post.permalink} | ${post.title}`,
+          addedFrom: `the Reddit scout (r/${post.subreddit})`,
+        });
+        written.push({ ...row, notionPageId });
+        counts.written++;
+        console.log(`[scout] wrote ${post.author} (${result.verdict})`);
+      } catch (err) {
+        skipped.push(`${post.author}: error ${err?.message || err}`);
+      }
+    });
+
+    const durationMs = Date.now() - startedAt;
+    console.log(
+      `[scout] done in ${Math.round(durationMs / 1000)}s: scanned ${counts.scanned}, ` +
+        `prefiltered ${counts.prefiltered}, deduped ${counts.deduped}, ` +
+        `scored ${counts.scored}, written ${counts.written}${partial ? " (PARTIAL)" : ""}`
+    );
+
+    // `written` is the COUNT (per the response contract); the detail rows are
+    // writtenRows. Spreading counts and then a same-named array silently
+    // replaced the number with the array, which the workflow summary rendered
+    // as a wall of JSON where a digit belonged.
+    res.json({ ...counts, writtenRows: written, skipped, partial, dryRun, durationMs });
+  } catch (err) {
+    console.error("POST /api/scout failed:", err?.message || err);
+    res.status(500).json({
+      error: err?.message || "Scout failed",
+      ...counts,
+      writtenRows: written,
+      skipped,
+      partial: true,
+      durationMs: Date.now() - startedAt,
+    });
+  }
+});
+
+/* 8) POST /api/photo { linkedinUrl } -> { photoUrl }
    Best-effort recipient photo for the preview. Tries to read the page's
    og:image via Firecrawl. LinkedIn usually serves a login wall, so this often
    returns null — the UI falls back to an initials avatar. Never throws. */
