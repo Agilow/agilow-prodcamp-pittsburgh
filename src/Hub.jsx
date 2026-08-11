@@ -1162,7 +1162,22 @@ function Drafts({
   );
 }
 
-/* Parse pasted lines: "Name, Company" or "Name, Company, LinkedInURL". */
+/* How many leads go to the server per /api/qualify call. Matches the server's
+   QUALIFY_BATCH_MAX; the server runs them 3 at a time. */
+const QUALIFY_CHUNK = 20;
+
+/* Does this text look like a spreadsheet export? Used to keep the naive
+   comma-splitting fallback away from CSV, which it would shred into rows of
+   header fragments and half-names. */
+function looksLikeCsv(text) {
+  return /^[^\n]*\b(first name|last name|full name|position|job title|company|connected on)\b[^\n]*,/im.test(
+    text
+  );
+}
+
+/* Local fallback for when the parse API is unreachable. Handles
+   "Name, Company" and "Name, Company, LinkedInURL" only — anything
+   CSV-shaped is refused upstream by looksLikeCsv. */
 function parseLeadLines(text) {
   return text
     .split("\n")
@@ -1214,47 +1229,84 @@ function Qualify({ onOpenDraft, onRefreshLeads, onDraftAll, input, setInput, row
   const [parsing, setParsing] = useState(false);
   const [draftingAll, setDraftingAll] = useState(false);
   const [batchError, setBatchError] = useState(null);
+  // Parsing is now a separate step from scoring: you see the row count and
+  // confirm before any research spend. `parsed` holds the staged leads.
+  const [parsed, setParsed] = useState(null);
+  const [parseNote, setParseNote] = useState(null);
+  const fileRef = useRef(null);
 
   const patchRow = (id, patch) =>
     setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...patch } : r)));
 
-  // Smart-parse the pasted text via the LLM so URLs land in the right field;
-  // fall back to naive comma-splitting if the API call fails.
-  async function parseInput() {
+  // Server-side parse: CSV exports are split deterministically there, messy
+  // paste goes through the LLM. The naive comma fallback is only for a dead
+  // API — and never for CSV text, which it would shred into bogus rows.
+  async function parseInput(text) {
     try {
       const res = await fetch(apiUrl("/api/parse-leads"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: input }),
+        body: JSON.stringify({ text }),
       });
       const data = await res.json();
       if (res.ok && Array.isArray(data.leads) && data.leads.length) {
-        return data.leads.map((l, i) => ({
-          id: `q-${i}-${(l.name || "").slice(0, 12)}-${(l.company || "").slice(0, 12)}`,
-          name: l.name || "",
-          company: l.company || "",
-          linkedinUrl: l.linkedinUrl || "",
-          companyUrl: l.companyUrl || "",
-        }));
+        return {
+          leads: data.leads.map((l, i) => ({
+            id: `q-${i}-${(l.name || "").slice(0, 12)}-${(l.company || "").slice(0, 12)}`,
+            name: l.name || "",
+            company: l.company || "",
+            role: l.role || "",
+            linkedinUrl: l.linkedinUrl || "",
+            companyUrl: l.companyUrl || "",
+            source: l.source || "",
+            note: l.note || "",
+          })),
+          mode: data.mode,
+          truncated: !!data.truncated,
+          skipped: data.skipped || 0,
+        };
       }
-    } catch {
-      /* fall through to naive parser */
+      if (res.ok) return { leads: [], mode: data.mode, truncated: !!data.truncated, skipped: 0 };
+      throw new Error(data?.error || "Parse failed");
+    } catch (e) {
+      if (looksLikeCsv(text)) throw e; // never comma-split a CSV
+      return { leads: parseLeadLines(text), mode: "fallback", truncated: false, skipped: 0 };
     }
-    return parseLeadLines(input);
   }
 
-  async function runQualify() {
-    if (!input.trim()) return;
+  // Step 1: parse and stage. Costs one cheap call (or zero, for CSV).
+  async function stageLeads(text) {
+    if (!text.trim()) return;
+    setBatchError(null);
+    setParseNote(null);
+    setParsed(null);
+    setParsing(true);
+    try {
+      const out = await parseInput(text);
+      setParsed(out.leads);
+      const bits = [];
+      if (out.mode === "csv") bits.push("parsed as CSV, no AI needed");
+      if (out.skipped) bits.push(`${out.skipped} empty row${out.skipped === 1 ? "" : "s"} skipped`);
+      if (out.truncated)
+        bits.push("input was too long and got truncated — some leads at the end were dropped");
+      if (out.mode === "fallback") bits.push("parsed locally (parser unreachable)");
+      setParseNote(bits.join(" · ") || null);
+      if (out.leads.length === 0) setBatchError("No leads found in that input.");
+    } catch (e) {
+      setBatchError(e.message || "Parse failed");
+    } finally {
+      setParsing(false);
+    }
+  }
+
+  // Step 2: score the staged leads, 20 at a time (the server's batch cap),
+  // three concurrent per chunk. Rows fill in as each chunk resolves.
+  async function scoreStaged() {
+    const leads = parsed || [];
+    if (leads.length === 0) return;
 
     setBatchError(null);
     setRunning(true);
-    setParsing(true);
-    const leads = await parseInput();
-    setParsing(false);
-    if (leads.length === 0) {
-      setRunning(false);
-      return;
-    }
     setRows(
       leads.map((l) => ({
         ...l,
@@ -1270,29 +1322,67 @@ function Qualify({ onOpenDraft, onRefreshLeads, onDraftAll, input, setInput, row
       }))
     );
 
-    for (let i = 0; i < leads.length; i++) {
-      const lead = leads[i];
-      patchRow(lead.id, { status: "qualifying" });
+    for (let i = 0; i < leads.length; i += QUALIFY_CHUNK) {
+      const chunk = leads.slice(i, i + QUALIFY_CHUNK);
+      setRows((rs) =>
+        rs.map((r) => (chunk.some((c) => c.id === r.id) ? { ...r, status: "qualifying" } : r))
+      );
       try {
         const res = await fetch(apiUrl("/api/qualify"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            name: lead.name,
-            company: lead.company,
-            linkedinUrl: lead.linkedinUrl || undefined,
-            companyUrl: lead.companyUrl || undefined,
+            leads: chunk.map((l) => ({
+              name: l.name,
+              company: l.company,
+              role: l.role || undefined,
+              linkedinUrl: l.linkedinUrl || undefined,
+              companyUrl: l.companyUrl || undefined,
+              source: l.source || undefined,
+              note: l.note || undefined,
+            })),
           }),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "Qualify failed");
-        patchRow(lead.id, { status: "done", result: data });
+        if (data.dropped > 0) {
+          setBatchError(`Server scored only ${data.batchMax} of ${chunk.length} leads in a chunk.`);
+        }
+        const results = data.results || [];
+        setRows((rs) =>
+          rs.map((r) => {
+            const idx = chunk.findIndex((c) => c.id === r.id);
+            if (idx === -1) return r;
+            const out = results[idx];
+            if (!out) return { ...r, status: "error", error: "No result returned" };
+            if (out.error) return { ...r, status: "error", error: out.error };
+            return { ...r, status: "done", result: out };
+          })
+        );
       } catch (e) {
-        patchRow(lead.id, { status: "error", error: e.message });
+        setRows((rs) =>
+          rs.map((r) =>
+            chunk.some((c) => c.id === r.id) ? { ...r, status: "error", error: e.message } : r
+          )
+        );
       }
     }
 
+    setParsed(null);
     setRunning(false);
+  }
+
+  function onPickFile(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const text = String(reader.result || "");
+      setInput(text);
+      stageLeads(text);
+    };
+    reader.readAsText(file);
+    e.target.value = ""; // allow re-picking the same file
   }
 
   async function addToCrm(row) {
@@ -1429,31 +1519,74 @@ function Qualify({ onOpenDraft, onRefreshLeads, onDraftAll, input, setInput, row
             className="qualify-textarea"
             placeholder={"Priya Sharma, Scrum Master, Zeta Systems\nMarcus Delgado — Engineering Manager — Fernwood Labs\nhttps://www.linkedin.com/in/jordan-avery"}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => {
+              setInput(e.target.value);
+              if (parsed) setParsed(null); // edited since staging — re-parse
+            }}
             disabled={running}
           />
           <div className="qualify-actions">
             <button
               className="btn-secondary"
-              disabled={running || !input.trim()}
-              onClick={runQualify}
+              disabled={running || parsing || !input.trim()}
+              onClick={() => stageLeads(input)}
             >
               {parsing ? (
                 <>
                   <RefreshCw size={13} className="spin" style={{ marginRight: 5 }} />
-                  Formatting…
-                </>
-              ) : running ? (
-                <>
-                  <RefreshCw size={13} className="spin" style={{ marginRight: 5 }} />
-                  Qualifying…
+                  Reading…
                 </>
               ) : (
-                "Qualify"
+                "Parse leads"
               )}
             </button>
+
+            <input
+              ref={fileRef}
+              type="file"
+              accept=".csv,text/csv,text/plain"
+              onChange={onPickFile}
+              style={{ display: "none" }}
+            />
+            <button
+              className="btn-secondary"
+              disabled={running || parsing}
+              onClick={() => fileRef.current?.click()}
+            >
+              Upload CSV
+            </button>
+
             {batchError && <span className="qualify-batch-error">{batchError}</span>}
           </div>
+
+          {/* Confirm before spending: scoring a lead costs several web
+              searches, so the row count is shown first. */}
+          {parsed && parsed.length > 0 && (
+            <div className="qualify-confirm">
+              <div className="qualify-confirm-copy">
+                <strong>
+                  {parsed.length} lead{parsed.length === 1 ? "" : "s"} ready
+                </strong>
+                {parseNote && <small>{parseNote}</small>}
+                {parsed.length > QUALIFY_CHUNK && (
+                  <small>
+                    Scored in {Math.ceil(parsed.length / QUALIFY_CHUNK)} batches of{" "}
+                    {QUALIFY_CHUNK}.
+                  </small>
+                )}
+              </div>
+              <button className="btn-send" disabled={running} onClick={scoreStaged}>
+                {running ? (
+                  <>
+                    <RefreshCw size={13} className="spin" style={{ marginRight: 5 }} />
+                    Scoring…
+                  </>
+                ) : (
+                  `Score ${parsed.length} lead${parsed.length === 1 ? "" : "s"}`
+                )}
+              </button>
+            </div>
+          )}
         </div>
 
         {sortedRows.length > 0 && (
@@ -1475,7 +1608,10 @@ function Qualify({ onOpenDraft, onRefreshLeads, onDraftAll, input, setInput, row
                   <div className="qualify-row-head">
                     <div className="qualify-row-identity">
                       <strong>{row.name || "—"}</strong>
-                      <small>{row.company || "—"}</small>
+                      <small>
+                        {[row.result?.role || row.role, row.company].filter(Boolean).join(" · ") ||
+                          "—"}
+                      </small>
                     </div>
 
                     {row.status === "pending" && (

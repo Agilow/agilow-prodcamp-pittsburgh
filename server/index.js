@@ -931,7 +931,9 @@ app.use(
       : true,
   })
 );
-app.use(express.json({ limit: "1mb" }));
+// 5mb: a LinkedIn connections export of a few thousand rows exceeds the old
+// 1mb default, and the failure mode was a bare 413 the UI never surfaced.
+app.use(express.json({ limit: "5mb" }));
 
 app.get("/api/health", (_req, res) => res.json({ ok: true }));
 
@@ -1111,6 +1113,8 @@ app.post("/api/qualify", async (req, res) => {
   try {
     if (Array.isArray(body.leads)) {
       const leads = body.leads.slice(0, QUALIFY_BATCH_MAX);
+      // Report the drop rather than silently scoring a prefix.
+      const dropped = body.leads.length - leads.length;
       if (leads.length === 0) throw new Error("leads array is empty");
       const results = await mapLimit(leads, QUALIFY_CONCURRENCY, async (lead) => {
         try {
@@ -1123,7 +1127,7 @@ app.post("/api/qualify", async (req, res) => {
           };
         }
       });
-      return res.json({ results });
+      return res.json({ results, dropped, batchMax: QUALIFY_BATCH_MAX });
     }
 
     if (!body.name && !body.company) throw new Error("name or company is required");
@@ -1211,14 +1215,141 @@ app.post("/api/add-to-crm", async (req, res) => {
   }
 });
 
-/* 6) POST /api/parse-leads { text } -> { leads: [{name, company, linkedinUrl, companyUrl}] }
-   LLM-cleans messy pasted input: routes URLs to the right field (so a LinkedIn
-   link never lands in the company name), extracts names/companies, and derives
-   a name from a profile slug when no name is given. */
+/* ============================================================
+   Lead parsing: a deterministic CSV path and an LLM path.
+
+   A LinkedIn connections export is a solved parsing problem — it does not
+   need a model, and running one over it costs money, truncates at whatever
+   character cap we pick, and can hallucinate rows. So CSV is sniffed and
+   parsed here; only genuinely messy paste goes to the LLM.
+   ============================================================ */
+
+/* One CSV line -> fields. Handles quoted fields containing commas and
+   doubled "" escapes, which real exports do produce (company names). */
+function splitCsvLine(line) {
+  const out = [];
+  let cur = "";
+  let quoted = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (quoted) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') {
+          cur += '"';
+          i++;
+        } else quoted = false;
+      } else cur += ch;
+    } else if (ch === '"') {
+      quoted = true;
+    } else if (ch === ",") {
+      out.push(cur);
+      cur = "";
+    } else cur += ch;
+  }
+  out.push(cur);
+  return out.map((s) => s.trim());
+}
+
+/* Header aliases -> canonical field. Covers LinkedIn's Connections.csv and
+   the common Sales Navigator / CRM export spellings. */
+const CSV_ALIASES = {
+  firstName: ["first name", "firstname", "given name"],
+  lastName: ["last name", "lastname", "surname", "family name"],
+  name: ["name", "full name", "contact name", "person"],
+  company: ["company", "company name", "organization", "organisation", "employer", "account name"],
+  role: ["position", "title", "job title", "role", "current title", "headline"],
+  linkedinUrl: ["url", "profile url", "linkedin", "linkedin url", "person linkedin url", "profile"],
+  companyUrl: ["website", "company website", "company url", "domain"],
+  connectedOn: ["connected on", "connection date", "date connected"],
+};
+
+/* Detect + parse a CSV export. Returns { leads, rows } or null when the text
+   is not a CSV we recognise (caller then falls through to the LLM path).
+
+   LinkedIn prefixes the real header with a "Notes:" preamble, so the header
+   is located by content rather than by a fixed line offset — the preamble has
+   changed length before and will again. */
+function parseCsvLeads(text) {
+  const lines = String(text).split(/\r?\n/);
+  let headerIdx = -1;
+  let cols = null;
+
+  for (let i = 0; i < Math.min(lines.length, 20); i++) {
+    if (!lines[i].includes(",")) continue;
+    const cells = splitCsvLine(lines[i]).map((c) => c.toLowerCase());
+    const find = (key) => cells.findIndex((c) => CSV_ALIASES[key].includes(c));
+    const idx = Object.fromEntries(Object.keys(CSV_ALIASES).map((k) => [k, find(k)]));
+    const hasName = idx.firstName >= 0 || idx.name >= 0;
+    const hasContext = idx.company >= 0 || idx.role >= 0 || idx.linkedinUrl >= 0;
+    if (hasName && hasContext) {
+      headerIdx = i;
+      cols = idx;
+      break;
+    }
+  }
+  if (headerIdx === -1) return null;
+
+  const at = (cells, i) => (i >= 0 && i < cells.length ? cells[i] : "");
+  const leads = [];
+  let rows = 0;
+
+  for (let i = headerIdx + 1; i < lines.length; i++) {
+    if (!lines[i].trim()) continue;
+    rows++;
+    const cells = splitCsvLine(lines[i]);
+    const name =
+      cols.name >= 0
+        ? at(cells, cols.name)
+        : [at(cells, cols.firstName), at(cells, cols.lastName)].filter(Boolean).join(" ");
+    const company = at(cells, cols.company);
+    const linkedinUrl = at(cells, cols.linkedinUrl);
+    if (!name && !company && !linkedinUrl) continue;
+
+    const connectedOn = at(cells, cols.connectedOn);
+    leads.push({
+      name,
+      company,
+      role: at(cells, cols.role),
+      linkedinUrl: /^https?:\/\//i.test(linkedinUrl) ? linkedinUrl : "",
+      companyUrl: at(cells, cols.companyUrl),
+      source: "csv-import",
+      note: connectedOn ? `Connected ${connectedOn}` : "",
+    });
+  }
+
+  return { leads, rows };
+}
+
+/* Cap on the LLM path only. The CSV path has no cap — it never reaches a
+   model, so there is nothing to truncate for. */
+const PARSE_LLM_CHAR_CAP = 20000;
+
+/* 6) POST /api/parse-leads { text }
+   -> { leads: [{name, company, role, linkedinUrl, companyUrl, source, note}],
+        mode, truncated }
+   CSV exports are parsed deterministically. Anything else is LLM-cleaned:
+   URLs routed to the right field (so a LinkedIn link never lands in the
+   company name), names/companies/titles extracted, and a name derived from a
+   profile slug when none is given. */
 app.post("/api/parse-leads", async (req, res) => {
   const { text } = req.body || {};
   try {
     if (typeof text !== "string" || !text.trim()) throw new Error("text is required");
+
+    // Deterministic path: a recognised CSV export never reaches the model.
+    const csv = parseCsvLeads(text);
+    if (csv) {
+      console.log(`[parse-leads] csv: ${csv.leads.length} leads from ${csv.rows} rows`);
+      return res.json({
+        leads: csv.leads,
+        mode: "csv",
+        truncated: false,
+        rows: csv.rows,
+        skipped: csv.rows - csv.leads.length,
+      });
+    }
+
+    const truncated = text.length > PARSE_LLM_CHAR_CAP;
     const resp = await withRetry(
       () =>
         getOpenAI().responses.create({
@@ -1228,16 +1359,28 @@ app.post("/api/parse-leads", async (req, res) => {
             {
               role: "system",
               content:
-                "You clean up a pasted list of sales leads into structured rows. The input is messy: " +
-                "each lead may be on one line as 'Name, Company', or may include a LinkedIn profile URL " +
-                "(linkedin.com/in/...) and/or a company website URL anywhere in the line. " +
-                "RULES: Put the person's full name in `name`, the company in `company`, a LinkedIn profile " +
-                "URL in `linkedinUrl`, and a company website URL in `companyUrl`. NEVER put a URL in `name` " +
-                "or `company`. If a line is only a LinkedIn URL with no name, derive a plausible human name " +
-                "from the profile slug (e.g. /in/jane-doe-123 -> 'Jane Doe'); leave company empty if unknown. " +
-                "If a value is genuinely unknown, use an empty string. Return one row per distinct lead.",
+                "You clean up a pasted list of sales leads into structured rows. The input is messy. A lead " +
+                "may be one line of 'Name, Title, Company'; may include a LinkedIn profile URL " +
+                "(linkedin.com/in/...) and/or a company website URL anywhere in the line; or may be a block " +
+                "copied straight off a LinkedIn profile, a Sales Navigator result, or a search-results page. " +
+                "Those pasted blocks put the name on its own line, then a headline like " +
+                "'Engineering Manager at Acme | ex-Google', then noise such as '3rd', '500+ connections', " +
+                "'Greater Boston Area', 'Message', 'Connect', or a shared-connections line. " +
+                "RULES: Put the person's full name in `name`, their job title in `role`, the company in " +
+                "`company`, a LinkedIn profile URL in `linkedinUrl`, and a company website URL in " +
+                "`companyUrl`. Split a headline like 'Scrum Master at Zeta' into role='Scrum Master' and " +
+                "company='Zeta'. NEVER put a URL, a degree symbol, a connection count, or a location in " +
+                "`name`, `role`, or `company`. Drop UI noise lines entirely — they are not leads. If a line " +
+                "is only a LinkedIn URL with no name, derive a plausible human name from the profile slug " +
+                "(e.g. /in/jane-doe-123 -> 'Jane Doe'); leave company empty if unknown. Put anything that " +
+                "reads like a personal note or context about the lead in `note`, and where the lead came " +
+                "from in `source` if the input says so. If a value is genuinely unknown, use an empty " +
+                "string. Return one row per distinct PERSON, no duplicates.",
             },
-            { role: "user", content: `Parse these leads:\n\n${text.slice(0, 8000)}` },
+            {
+              role: "user",
+              content: `Parse these leads:\n\n${text.slice(0, PARSE_LLM_CHAR_CAP)}`,
+            },
           ],
           text: {
             format: {
@@ -1256,10 +1399,23 @@ app.post("/api/parse-leads", async (req, res) => {
                       properties: {
                         name: { type: "string" },
                         company: { type: "string" },
+                        role: { type: "string" },
                         linkedinUrl: { type: "string" },
                         companyUrl: { type: "string" },
+                        source: { type: "string" },
+                        note: { type: "string" },
                       },
-                      required: ["name", "company", "linkedinUrl", "companyUrl"],
+                      // strict mode requires every property listed; the model
+                      // emits "" for anything the input didn't supply.
+                      required: [
+                        "name",
+                        "company",
+                        "role",
+                        "linkedinUrl",
+                        "companyUrl",
+                        "source",
+                        "note",
+                      ],
                     },
                   },
                 },
@@ -1271,7 +1427,13 @@ app.post("/api/parse-leads", async (req, res) => {
       "openai.parse-leads"
     );
     const parsed = JSON.parse((resp.output_text || "{}").trim());
-    res.json({ leads: Array.isArray(parsed.leads) ? parsed.leads : [] });
+    const leads = Array.isArray(parsed.leads) ? parsed.leads : [];
+    if (truncated) {
+      console.warn(
+        `[parse-leads] llm: input ${text.length} chars truncated to ${PARSE_LLM_CHAR_CAP}`
+      );
+    }
+    res.json({ leads, mode: "llm", truncated, chars: text.length });
   } catch (err) {
     console.error("POST /api/parse-leads failed:", err?.message || err);
     res.status(500).json({ error: err?.message || "Parse failed" });
