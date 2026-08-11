@@ -113,6 +113,33 @@ const PROPS = {
 /* ============================================================
    Notion schema cache + type-aware read / write helpers
    ============================================================ */
+/* Every row in the CRM, following the cursor. Notion caps a query at 100 per
+   page and signals more with has_more; the previous single-shot queries just
+   stopped at the first page, so a CRM past 100 rows silently showed a subset
+   and deduping against it would have missed everything beyond the cut.
+   `pageCap` is a runaway guard, not a limit anyone should hit. */
+async function queryAllPages(extra = {}, label = "all pages", pageCap = 50) {
+  const out = [];
+  let cursor;
+  for (let i = 0; i < pageCap; i++) {
+    const res = await withRetry(
+      () =>
+        getNotion().databases.query({
+          database_id: DATABASE_ID,
+          page_size: 100,
+          ...(cursor ? { start_cursor: cursor } : {}),
+          ...extra,
+        }),
+      `databases.query (${label})`
+    );
+    out.push(...(res.results || []));
+    if (!res.has_more || !res.next_cursor) return out;
+    cursor = res.next_cursor;
+  }
+  console.warn(`[notion] ${label}: hit the ${pageCap}-page cap, results may be incomplete`);
+  return out;
+}
+
 let dbSchemaCache = { at: 0, value: null };
 async function getDbSchema() {
   // Short TTL so column renames/additions are picked up without a restart.
@@ -443,6 +470,75 @@ function mapLead(page, index, schema) {
   };
 }
 
+/* ============================================================
+   Dedupe keys. A lead can be recognised three ways, and any one
+   of them matching means we already have this person.
+   ============================================================ */
+
+/* linkedin.com/in/jane-doe/?utm=x -> linkedin.com/in/jane-doe */
+function normalizeLinkedinKey(url) {
+  const s = String(url || "").trim();
+  if (!s) return "";
+  return s
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/^www\./, "")
+    .split(/[?#]/)[0]
+    .replace(/\/+$/, "");
+}
+
+const nameCompanyKey = (name, company) =>
+  `${String(name || "").trim().toLowerCase()}|${String(company || "").trim().toLowerCase()}`;
+
+const redditKey = (username) =>
+  `reddit:${String(username || "").trim().toLowerCase().replace(/^\/?u\//, "")}`;
+
+/* Every key that identifies `lead`. Used both to build the existing-key set
+   and to test a candidate against it. */
+function leadKeys({ name, company, linkedinUrl, redditUsername } = {}) {
+  const keys = [];
+  const li = normalizeLinkedinKey(linkedinUrl);
+  if (li) keys.push(li);
+  if (name || company) keys.push(nameCompanyKey(name, company));
+  if (redditUsername) keys.push(redditKey(redditUsername));
+  return keys;
+}
+
+/* Normalized keys for every lead already in the CRM. The scout checks
+   candidates against this before spending anything on scoring.
+
+   The reddit key is recovered from the Notes column: this CRM has no URL or
+   LinkedIn column, so Notes is where the scout writes "reddit:<user>". */
+async function getExistingLeadKeys() {
+  const schema = await getDbSchema();
+  const P = resolvePropMap(schema);
+  const pages = await queryAllPages({}, "dedupe keys");
+  const keys = new Set();
+
+  for (const page of pages) {
+    const props = page.properties || {};
+    const name = readProp(props, P.contact) || "";
+    const company = readProp(props, P.company) || titleValue(props) || "";
+    const notes = readProp(props, P.notes) || "";
+    const linkedinUrl = readProp(props, P.linkedin) || "";
+
+    // Notes may carry "LinkedIn: <url>" from an earlier add even when the
+    // column itself is absent, so look there too.
+    const fromNotes = notes.match(/https?:\/\/[^\s|]*linkedin\.com\/in\/[^\s|]*/i)?.[0] || "";
+    const reddit = notes.match(/reddit:([A-Za-z0-9_-]+)/i)?.[1] || "";
+
+    for (const k of leadKeys({
+      name,
+      company,
+      linkedinUrl: linkedinUrl || fromNotes,
+      redditUsername: reddit,
+    })) {
+      keys.add(k);
+    }
+  }
+  return keys;
+}
+
 /* Pull the fields the research prompt needs from a single page. */
 function readResearchInputs(page, schema) {
   const props = page.properties || {};
@@ -499,16 +595,11 @@ async function getAllEditPairs() {
     const P = resolvePropMap(schema);
     // Both columns must exist for there to be an edit signal to learn from.
     if (schema[P.aiDraft] && schema[P.draft]) {
-      const query = await withRetry(
-        () =>
-          getNotion().databases.query({
-            database_id: DATABASE_ID,
-            page_size: 50,
-            sorts: [{ timestamp: "last_edited_time", direction: "descending" }],
-          }),
-        "databases.query (edit examples)"
+      const results = await queryAllPages(
+        { sorts: [{ timestamp: "last_edited_time", direction: "descending" }] },
+        "edit examples"
       );
-      for (const page of query.results) {
+      for (const page of results) {
         const props = page.properties || {};
         const aiDraft = readProp(props, P.aiDraft);
         const humanEdited = readProp(props, P.draft);
@@ -948,11 +1039,8 @@ app.get("/api/leads", async (_req, res) => {
   try {
     if (!DATABASE_ID) throw new Error("NOTION_DATABASE_ID is not set");
     const schema = await getDbSchema();
-    const query = await withRetry(
-      () => getNotion().databases.query({ database_id: DATABASE_ID, page_size: 100 }),
-      "databases.query"
-    );
-    const leads = query.results.map((page, i) => mapLead(page, i, schema));
+    const pages = await queryAllPages({}, "leads");
+    const leads = pages.map((page, i) => mapLead(page, i, schema));
     res.json(leads);
   } catch (err) {
     console.error("GET /api/leads failed:", err?.message || err);
@@ -1157,58 +1245,77 @@ function fitFromVerdict(verdict) {
   return "Medium"; // Moderate / Moderate (unverified) -> the CRM's "Medium"
 }
 
+/* Create one CRM row. The single writer: /api/add-to-crm and the scout both
+   go through here, so a change to what a new lead looks like is one edit.
+
+   `note` lets a caller append its own provenance to the Notes column, which
+   is where the scout puts its "reddit:<user>" dedupe key and the permalink —
+   this CRM has no URL column to put them in. Returns the new page id. */
+async function addLeadToCrm(lead = {}) {
+  const {
+    name,
+    company,
+    linkedinUrl,
+    companyUrl,
+    verdict,
+    dossier,
+    owner,
+    note,
+    addedFrom = "the Qualify screen",
+  } = lead;
+
+  if (!name && !company) throw new Error("name or company is required");
+  const schema = await getDbSchema();
+
+  const noteParts = [];
+  if (verdict) noteParts.push(`ICP verdict: ${verdict}`);
+  if (linkedinUrl) noteParts.push(`LinkedIn: ${linkedinUrl}`);
+  if (note) noteParts.push(note);
+  noteParts.push(`Added from ${addedFrom}.`);
+
+  const entries = {
+    company: company || name,
+    contact: name || "",
+    notes: noteParts.join(" | "),
+  };
+  const fit = fitFromVerdict(verdict);
+  if (fit) entries.icp = fit;
+  if (dossier) entries.research = dossier;
+  if (linkedinUrl) entries.linkedin = linkedinUrl;
+  if (companyUrl) entries.companyUrl = companyUrl;
+
+  // Persist the owner so the new row reflects who this lead belongs to.
+  if (typeof owner === "string" && owner.trim()) {
+    entries.owner = owner.trim();
+  }
+
+  // Best-effort status tag for Notion views. If the Status column has no
+  // option with this exact name, buildWrite() skips it gracefully.
+  entries.status = "Currently researching";
+
+  const properties = writeProps(schema, entries);
+
+  const page = await withRetry(
+    () => getNotion().pages.create({ parent: { database_id: DATABASE_ID }, properties }),
+    "pages.create"
+  );
+
+  // Dossier goes in the page BODY as well (this CRM has no Research column).
+  if (dossier) {
+    try {
+      await writeDossierToBody(page.id, dossier);
+    } catch (e) {
+      console.warn("dossier body write failed (continuing):", e?.message || e);
+    }
+  }
+
+  return page.id;
+}
+
 app.post("/api/add-to-crm", async (req, res) => {
-  const { name, company, linkedinUrl, companyUrl, verdict, dossier, owner } = req.body || {};
   try {
-    if (!name && !company) throw new Error("name or company is required");
-    const schema = await getDbSchema();
-
-    const noteParts = [];
-    if (verdict) noteParts.push(`ICP verdict: ${verdict}`);
-    if (linkedinUrl) noteParts.push(`LinkedIn: ${linkedinUrl}`);
-    noteParts.push("Added from the Qualify screen.");
-
-    const entries = {
-      company: company || name,
-      contact: name || "",
-      notes: noteParts.join(" | "),
-    };
-    const fit = fitFromVerdict(verdict);
-    if (fit) entries.icp = fit;
-    if (dossier) entries.research = dossier;
-    if (linkedinUrl) entries.linkedin = linkedinUrl;
-    if (companyUrl) entries.companyUrl = companyUrl;
-
-    // If the Qualify screen was "sending as" a specific owner, persist that so
-    // the new CRM row immediately reflects who this lead is owned by.
-    if (typeof owner === "string" && owner.trim()) {
-      entries.owner = owner.trim();
-    }
-
-    // Mark freshly-qualified leads as "Currently researching" in the Status
-    // column when they are first added from the Qualify screen, so Notion
-    // views can filter on that tag. (Write is best-effort: if the Status
-    // column doesn't have an option with this exact name, buildWrite() will
-    // skip it gracefully.)
-    entries.status = "Currently researching";
-
-    const properties = writeProps(schema, entries);
-
-    const page = await withRetry(
-      () => getNotion().pages.create({ parent: { database_id: DATABASE_ID }, properties }),
-      "pages.create"
-    );
-
-    // If a dossier was passed (from Qualify), write it into the new page's body.
-    if (dossier) {
-      try {
-        await writeDossierToBody(page.id, dossier);
-      } catch (e) {
-        console.warn("dossier body write failed (continuing):", e?.message || e);
-      }
-    }
-
-    res.json({ ok: true, notionPageId: page.id });
+    const notionPageId = await addLeadToCrm(req.body || {});
+    res.json({ ok: true, notionPageId });
   } catch (err) {
     console.error("POST /api/add-to-crm failed:", err?.message || err);
     res.status(500).json({ error: err?.message || "Add to CRM failed" });
