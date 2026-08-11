@@ -17,6 +17,9 @@ import {
   RESEARCH_VERIFY,
   EXPLAIN_EDIT_PROMPT,
 } from "./prompts.js";
+// Scout: isolated behind these two modules plus the /api/scout route.
+import { fetchRedditCandidates, prefilterCandidates } from "./scout-sources.js";
+import { CAPS, WRITE_VERDICTS, SCOUT_OWNER } from "./scout-config.js";
 
 // Prefer IPv4. Some hosts (e.g. Render) have flaky IPv6 egress that surfaces as
 // intermittent "Premature close" / "fetch failed" when calling api.notion.com.
@@ -49,6 +52,25 @@ const DATABASE_ID = process.env.NOTION_DATABASE_ID;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1";
 const FIRECRAWL_API_KEY = process.env.FIRECRAWL_API_KEY;
 const FIRECRAWL_BASE = "https://api.firecrawl.dev/v2";
+// Shared secret for /api/scout. That route spends money and writes to the
+// CRM, so unlike the rest of this server it is not open.
+const SCOUT_SECRET = process.env.SCOUT_SECRET;
+
+/* Bearer check for the scout route. Fails closed: with no secret configured
+   the route is disabled rather than public. */
+function requireScoutAuth(req, res) {
+  if (!SCOUT_SECRET) {
+    res.status(503).json({ error: "SCOUT_SECRET is not set; /api/scout is disabled" });
+    return false;
+  }
+  const header = req.get("authorization") || "";
+  const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
+  if (token !== SCOUT_SECRET) {
+    res.status(401).json({ error: "Unauthorized" });
+    return false;
+  }
+  return true;
+}
 
 // Lazy clients — construct on first use so the server boots even when keys
 // are unset, and each endpoint returns a clear error instead of crashing.
@@ -113,6 +135,33 @@ const PROPS = {
 /* ============================================================
    Notion schema cache + type-aware read / write helpers
    ============================================================ */
+/* Every row in the CRM, following the cursor. Notion caps a query at 100 per
+   page and signals more with has_more; the previous single-shot queries just
+   stopped at the first page, so a CRM past 100 rows silently showed a subset
+   and deduping against it would have missed everything beyond the cut.
+   `pageCap` is a runaway guard, not a limit anyone should hit. */
+async function queryAllPages(extra = {}, label = "all pages", pageCap = 50) {
+  const out = [];
+  let cursor;
+  for (let i = 0; i < pageCap; i++) {
+    const res = await withRetry(
+      () =>
+        getNotion().databases.query({
+          database_id: DATABASE_ID,
+          page_size: 100,
+          ...(cursor ? { start_cursor: cursor } : {}),
+          ...extra,
+        }),
+      `databases.query (${label})`
+    );
+    out.push(...(res.results || []));
+    if (!res.has_more || !res.next_cursor) return out;
+    cursor = res.next_cursor;
+  }
+  console.warn(`[notion] ${label}: hit the ${pageCap}-page cap, results may be incomplete`);
+  return out;
+}
+
 let dbSchemaCache = { at: 0, value: null };
 async function getDbSchema() {
   // Short TTL so column renames/additions are picked up without a restart.
@@ -443,6 +492,75 @@ function mapLead(page, index, schema) {
   };
 }
 
+/* ============================================================
+   Dedupe keys. A lead can be recognised three ways, and any one
+   of them matching means we already have this person.
+   ============================================================ */
+
+/* linkedin.com/in/jane-doe/?utm=x -> linkedin.com/in/jane-doe */
+function normalizeLinkedinKey(url) {
+  const s = String(url || "").trim();
+  if (!s) return "";
+  return s
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/^www\./, "")
+    .split(/[?#]/)[0]
+    .replace(/\/+$/, "");
+}
+
+const nameCompanyKey = (name, company) =>
+  `${String(name || "").trim().toLowerCase()}|${String(company || "").trim().toLowerCase()}`;
+
+const redditKey = (username) =>
+  `reddit:${String(username || "").trim().toLowerCase().replace(/^\/?u\//, "")}`;
+
+/* Every key that identifies `lead`. Used both to build the existing-key set
+   and to test a candidate against it. */
+function leadKeys({ name, company, linkedinUrl, redditUsername } = {}) {
+  const keys = [];
+  const li = normalizeLinkedinKey(linkedinUrl);
+  if (li) keys.push(li);
+  if (name || company) keys.push(nameCompanyKey(name, company));
+  if (redditUsername) keys.push(redditKey(redditUsername));
+  return keys;
+}
+
+/* Normalized keys for every lead already in the CRM. The scout checks
+   candidates against this before spending anything on scoring.
+
+   The reddit key is recovered from the Notes column: this CRM has no URL or
+   LinkedIn column, so Notes is where the scout writes "reddit:<user>". */
+async function getExistingLeadKeys() {
+  const schema = await getDbSchema();
+  const P = resolvePropMap(schema);
+  const pages = await queryAllPages({}, "dedupe keys");
+  const keys = new Set();
+
+  for (const page of pages) {
+    const props = page.properties || {};
+    const name = readProp(props, P.contact) || "";
+    const company = readProp(props, P.company) || titleValue(props) || "";
+    const notes = readProp(props, P.notes) || "";
+    const linkedinUrl = readProp(props, P.linkedin) || "";
+
+    // Notes may carry "LinkedIn: <url>" from an earlier add even when the
+    // column itself is absent, so look there too.
+    const fromNotes = notes.match(/https?:\/\/[^\s|]*linkedin\.com\/in\/[^\s|]*/i)?.[0] || "";
+    const reddit = notes.match(/reddit:([A-Za-z0-9_-]+)/i)?.[1] || "";
+
+    for (const k of leadKeys({
+      name,
+      company,
+      linkedinUrl: linkedinUrl || fromNotes,
+      redditUsername: reddit,
+    })) {
+      keys.add(k);
+    }
+  }
+  return keys;
+}
+
 /* Pull the fields the research prompt needs from a single page. */
 function readResearchInputs(page, schema) {
   const props = page.properties || {};
@@ -499,16 +617,11 @@ async function getAllEditPairs() {
     const P = resolvePropMap(schema);
     // Both columns must exist for there to be an edit signal to learn from.
     if (schema[P.aiDraft] && schema[P.draft]) {
-      const query = await withRetry(
-        () =>
-          getNotion().databases.query({
-            database_id: DATABASE_ID,
-            page_size: 50,
-            sorts: [{ timestamp: "last_edited_time", direction: "descending" }],
-          }),
-        "databases.query (edit examples)"
+      const results = await queryAllPages(
+        { sorts: [{ timestamp: "last_edited_time", direction: "descending" }] },
+        "edit examples"
       );
-      for (const page of query.results) {
+      for (const page of results) {
         const props = page.properties || {};
         const aiDraft = readProp(props, P.aiDraft);
         const humanEdited = readProp(props, P.draft);
@@ -567,18 +680,24 @@ async function createResponseText(params, label) {
 }
 
 /* One targeted research pass: a web_search call driven by a system prompt. */
-async function runSearchPass(systemPrompt, label) {
+/* `web: false` drops the search tool. Used for pseudonymous leads, where the
+   only identifier is a handle: with the tool attached the model spends
+   minutes searching for "u/Easy-Marionberry-399", finds nothing (as it must),
+   and searches again. Measured at ~340s of a 400s run for a single lead. The
+   post is the evidence, so there is nothing out there to look for. */
+async function runSearchPass(systemPrompt, label, { web = true } = {}) {
   return createResponseText(
     {
       model: OPENAI_MODEL,
       temperature: 0.2,
-      tools: [{ type: "web_search" }],
+      ...(web ? { tools: [{ type: "web_search" }] } : {}),
       input: [
         { role: "system", content: systemPrompt },
         {
           role: "user",
-          content:
-            "Run this research pass now using web search. Return only the specified structured output, with a source URL on every fact line.",
+          content: web
+            ? "Run this research pass now using web search. Return only the specified structured output, with a source URL on every fact line."
+            : "Produce the dossier now from the material you were given. Do not claim any fact that is not in that material. Return only the specified structured output.",
         },
       ],
     },
@@ -686,18 +805,33 @@ async function fetchCareersContent(company, companyUrl) {
 
    `person` and `recent` always run: identity must be verified independently of
    what the input claimed, and the hook is never in a CSV. */
+/* Lead sources whose "name" is a handle, not a person. Searching the web for
+   u/Easy-Marionberry-399 finds nothing, and finding nothing is not evidence
+   of a bad lead — it is what a pseudonym looks like. */
+const PSEUDONYMOUS_SOURCES = new Set(["reddit"]);
+const isPseudonymous = (i) => PSEUDONYMOUS_SOURCES.has(String(i?.leadSource || "").toLowerCase());
+
 const RESEARCH_PASSES = [
-  { key: "person", template: RESEARCH_PERSON, when: () => true },
-  { key: "role", template: RESEARCH_ROLE, when: (i) => !i.leadTitle },
-  { key: "company", template: RESEARCH_COMPANY, when: (i) => !!i.company && !i.companyBlurb },
-  { key: "team", template: RESEARCH_TEAM, when: (i) => !i.teamSize },
-  { key: "tooling", template: RESEARCH_TOOLING, when: () => true },
-  { key: "recent", template: RESEARCH_RECENT, when: () => true },
+  // Identity passes are pointless for a handle: the post is the evidence.
+  { key: "person", template: RESEARCH_PERSON, when: (i) => !isPseudonymous(i) },
+  { key: "role", template: RESEARCH_ROLE, when: (i) => !isPseudonymous(i) && !i.leadTitle },
+  {
+    key: "company",
+    template: RESEARCH_COMPANY,
+    when: (i) => !isPseudonymous(i) && !!i.company && !i.companyBlurb,
+  },
+  { key: "team", template: RESEARCH_TEAM, when: (i) => !isPseudonymous(i) && !i.teamSize },
+  { key: "tooling", template: RESEARCH_TOOLING, when: (i) => !isPseudonymous(i) },
+  { key: "recent", template: RESEARCH_RECENT, when: (i) => !isPseudonymous(i) },
 ];
 
 /* Everything the caller asserted about this lead, handed to the verify pass as
    claims. Tagged so rule 1 files them as [UNVERIFIED] rather than laundering
-   user input into evidence. */
+   user input into evidence.
+
+   For a pseudonymous lead this is the WHOLE evidence base, so the post goes in
+   verbatim: the gate reads "my team of 8" and "as a scrum master" straight out
+   of it. */
 function buildKnownFacts(inputs) {
   const supplied = [
     ["Role/title", inputs.leadTitle],
@@ -709,10 +843,28 @@ function buildKnownFacts(inputs) {
     ["Note supplied with the lead", inputs.note],
   ].filter(([, v]) => v && String(v).trim());
 
-  if (supplied.length === 0) return "(none supplied with this lead)";
-  return supplied
-    .map(([label, v]) => `${label}: ${String(v).trim()} [UNVERIFIED — from input]`)
-    .join("\n");
+  const lines = supplied.map(
+    ([label, v]) => `${label}: ${String(v).trim()} [UNVERIFIED — from input]`
+  );
+
+  if (isPseudonymous(inputs) && inputs.post) {
+    const p = inputs.post;
+    lines.push(
+      "",
+      "SOURCE POST (this is the primary evidence for a pseudonymous lead):",
+      `Platform: reddit, r/${p.subreddit || "?"} [SELF-STATED — from source post]`,
+      `Handle: u/${inputs.leadName || "?"} [SELF-STATED — from source post]`,
+      p.flair ? `Flair: ${p.flair} [SELF-STATED — from source post]` : "",
+      `Posted: ${p.createdUtc ? new Date(p.createdUtc * 1000).toISOString().slice(0, 10) : "unknown"}`,
+      `Permalink: ${p.permalink || "unknown"}`,
+      `Title: ${p.title || ""} [SELF-STATED — from source post]`,
+      "Body:",
+      `${p.selftext || "(no body text)"} [SELF-STATED — from source post]`
+    );
+  }
+
+  const body = lines.filter((l) => l !== "").join("\n");
+  return body || "(none supplied with this lead)";
 }
 
 /* Multi-step research: the applicable targeted, source-tiered passes gathered
@@ -725,7 +877,8 @@ async function researchDossier(inputs) {
   const passes = RESEARCH_PASSES.filter((p) => p.when(inputs));
   const skipped = RESEARCH_PASSES.filter((p) => !p.when(inputs)).map((p) => p.key);
   if (skipped.length) {
-    console.log(`[research] ${inputs.leadName || "?"}: skipped ${skipped.join(", ")} (already known)`);
+    const why = isPseudonymous(inputs) ? "pseudonymous lead" : "already known";
+    console.log(`[research] ${inputs.leadName || "?"}: skipped ${skipped.join(", ")} (${why})`);
   }
 
   // Passes are independent -> run concurrently for depth without serial latency.
@@ -737,9 +890,17 @@ async function researchDossier(inputs) {
   );
   const gathered = Object.fromEntries(results);
 
-  const rawResearch = passes
-    .map(({ key }) => `### ${key.toUpperCase()} PASS\n${gathered[key] || "(no output)"}`)
-    .join("\n\n");
+  // Every web pass is keyed on a real identity, so a pseudonymous lead runs
+  // none of them. Say that explicitly rather than handing the verify pass an
+  // empty section it might read as "research came back empty" (which would
+  // look like a dead lead rather than a lead with a different evidence base).
+  const rawResearch = passes.length
+    ? passes
+        .map(({ key }) => `### ${key.toUpperCase()} PASS\n${gathered[key] || "(no output)"}`)
+        .join("\n\n")
+    : "(No web research passes were run. This is a PSEUDONYMOUS lead: the handle is not " +
+      "a real name, so identity lookups would return nothing and that absence would mean " +
+      "nothing. The SOURCE POST under KNOWN FACTS is the evidence base for this lead.)";
 
   // warmTie already = "Latest state | Notes: ..." (the human's claims).
   const verifySystem = fillPrompt(RESEARCH_VERIFY, {
@@ -749,7 +910,11 @@ async function researchDossier(inputs) {
     rawResearch,
   });
 
-  return runSearchPass(verifySystem, "openai.research.verify");
+  // No web search for a pseudonymous lead: there is no real identity to look
+  // up, and letting it try costs minutes per lead for guaranteed nothing.
+  return runSearchPass(verifySystem, "openai.research.verify", {
+    web: !isPseudonymous(inputs),
+  });
 }
 
 /* ============================================================
@@ -855,6 +1020,11 @@ async function qualifyOne(lead = {}) {
     companyUrl: lead.companyUrl || "",
     source: lead.source || "",
     note: lead.note || "",
+    // "reddit" switches the engine into pseudonymous mode: no web passes, the
+    // source post becomes the evidence base, and the identity tripwire stands
+    // down. Absent or "linkedin"/"csv"/"" means the normal real-name path.
+    leadSource: lead.leadSource || "",
+    post: lead.post || null,
     // A pasted lead has no CRM row, but a caller (scout feed, CSV import,
     // an operator pasting context) may still supply a relationship note.
     warmTie: lead.warmTie || lead.note || "",
@@ -866,6 +1036,7 @@ async function qualifyOne(lead = {}) {
     company: lead.company || "",
     role: lead.role || "",
     linkedinUrl: lead.linkedinUrl || "",
+    leadSource: inputs.leadSource,
     verdict: structured.verdict,
     contactType: structured.contactType || "Unknown",
     suggestedIntent: structured.suggestedIntent || "",
@@ -948,11 +1119,8 @@ app.get("/api/leads", async (_req, res) => {
   try {
     if (!DATABASE_ID) throw new Error("NOTION_DATABASE_ID is not set");
     const schema = await getDbSchema();
-    const query = await withRetry(
-      () => getNotion().databases.query({ database_id: DATABASE_ID, page_size: 100 }),
-      "databases.query"
-    );
-    const leads = query.results.map((page, i) => mapLead(page, i, schema));
+    const pages = await queryAllPages({}, "leads");
+    const leads = pages.map((page, i) => mapLead(page, i, schema));
     res.json(leads);
   } catch (err) {
     console.error("GET /api/leads failed:", err?.message || err);
@@ -1157,58 +1325,77 @@ function fitFromVerdict(verdict) {
   return "Medium"; // Moderate / Moderate (unverified) -> the CRM's "Medium"
 }
 
+/* Create one CRM row. The single writer: /api/add-to-crm and the scout both
+   go through here, so a change to what a new lead looks like is one edit.
+
+   `note` lets a caller append its own provenance to the Notes column, which
+   is where the scout puts its "reddit:<user>" dedupe key and the permalink —
+   this CRM has no URL column to put them in. Returns the new page id. */
+async function addLeadToCrm(lead = {}) {
+  const {
+    name,
+    company,
+    linkedinUrl,
+    companyUrl,
+    verdict,
+    dossier,
+    owner,
+    note,
+    addedFrom = "the Qualify screen",
+  } = lead;
+
+  if (!name && !company) throw new Error("name or company is required");
+  const schema = await getDbSchema();
+
+  const noteParts = [];
+  if (verdict) noteParts.push(`ICP verdict: ${verdict}`);
+  if (linkedinUrl) noteParts.push(`LinkedIn: ${linkedinUrl}`);
+  if (note) noteParts.push(note);
+  noteParts.push(`Added from ${addedFrom}.`);
+
+  const entries = {
+    company: company || name,
+    contact: name || "",
+    notes: noteParts.join(" | "),
+  };
+  const fit = fitFromVerdict(verdict);
+  if (fit) entries.icp = fit;
+  if (dossier) entries.research = dossier;
+  if (linkedinUrl) entries.linkedin = linkedinUrl;
+  if (companyUrl) entries.companyUrl = companyUrl;
+
+  // Persist the owner so the new row reflects who this lead belongs to.
+  if (typeof owner === "string" && owner.trim()) {
+    entries.owner = owner.trim();
+  }
+
+  // Best-effort status tag for Notion views. If the Status column has no
+  // option with this exact name, buildWrite() skips it gracefully.
+  entries.status = "Currently researching";
+
+  const properties = writeProps(schema, entries);
+
+  const page = await withRetry(
+    () => getNotion().pages.create({ parent: { database_id: DATABASE_ID }, properties }),
+    "pages.create"
+  );
+
+  // Dossier goes in the page BODY as well (this CRM has no Research column).
+  if (dossier) {
+    try {
+      await writeDossierToBody(page.id, dossier);
+    } catch (e) {
+      console.warn("dossier body write failed (continuing):", e?.message || e);
+    }
+  }
+
+  return page.id;
+}
+
 app.post("/api/add-to-crm", async (req, res) => {
-  const { name, company, linkedinUrl, companyUrl, verdict, dossier, owner } = req.body || {};
   try {
-    if (!name && !company) throw new Error("name or company is required");
-    const schema = await getDbSchema();
-
-    const noteParts = [];
-    if (verdict) noteParts.push(`ICP verdict: ${verdict}`);
-    if (linkedinUrl) noteParts.push(`LinkedIn: ${linkedinUrl}`);
-    noteParts.push("Added from the Qualify screen.");
-
-    const entries = {
-      company: company || name,
-      contact: name || "",
-      notes: noteParts.join(" | "),
-    };
-    const fit = fitFromVerdict(verdict);
-    if (fit) entries.icp = fit;
-    if (dossier) entries.research = dossier;
-    if (linkedinUrl) entries.linkedin = linkedinUrl;
-    if (companyUrl) entries.companyUrl = companyUrl;
-
-    // If the Qualify screen was "sending as" a specific owner, persist that so
-    // the new CRM row immediately reflects who this lead is owned by.
-    if (typeof owner === "string" && owner.trim()) {
-      entries.owner = owner.trim();
-    }
-
-    // Mark freshly-qualified leads as "Currently researching" in the Status
-    // column when they are first added from the Qualify screen, so Notion
-    // views can filter on that tag. (Write is best-effort: if the Status
-    // column doesn't have an option with this exact name, buildWrite() will
-    // skip it gracefully.)
-    entries.status = "Currently researching";
-
-    const properties = writeProps(schema, entries);
-
-    const page = await withRetry(
-      () => getNotion().pages.create({ parent: { database_id: DATABASE_ID }, properties }),
-      "pages.create"
-    );
-
-    // If a dossier was passed (from Qualify), write it into the new page's body.
-    if (dossier) {
-      try {
-        await writeDossierToBody(page.id, dossier);
-      } catch (e) {
-        console.warn("dossier body write failed (continuing):", e?.message || e);
-      }
-    }
-
-    res.json({ ok: true, notionPageId: page.id });
+    const notionPageId = await addLeadToCrm(req.body || {});
+    res.json({ ok: true, notionPageId });
   } catch (err) {
     console.error("POST /api/add-to-crm failed:", err?.message || err);
     res.status(500).json({ error: err?.message || "Add to CRM failed" });
@@ -1440,7 +1627,171 @@ app.post("/api/parse-leads", async (req, res) => {
   }
 });
 
-/* 7) POST /api/photo { linkedinUrl } -> { photoUrl }
+/* ============================================================
+   7) POST /api/scout — the automated sweep.
+
+   Bearer-authed. Fetch Reddit, triage cheaply, drop anyone already in
+   the CRM, score what is left through the same qualifyOne the Qualify
+   screen uses, write the ones that clear the threshold.
+
+   Writes happen per lead as it qualifies, never batched at the end. The
+   caller is a GitHub Actions curl against a free Render instance that
+   can be killed mid-flight, and a killed run should cost us the unscored
+   tail, not everything it had already earned.
+   ============================================================ */
+app.post("/api/scout", async (req, res) => {
+  if (!requireScoutAuth(req, res)) return;
+
+  const startedAt = Date.now();
+  const { sources, since, limit, dryRun = false } = req.body || {};
+  const budgetMs = CAPS.budgetMs;
+  const skipped = [];
+  const written = [];
+  let partial = false;
+
+  const counts = { scanned: 0, prefiltered: 0, deduped: 0, scored: 0, written: 0 };
+
+  try {
+    // 1. Fetch. `sources` narrows the subreddit list for a cheap test run.
+    const sinceUnix =
+      typeof since === "number"
+        ? since
+        : Math.floor(Date.now() / 1000) - CAPS.sinceDays * 86400;
+    // Fetch gets at most 40% of the run budget. Reddit's rate-limit backoff
+    // is unbounded in principle, and a run that fetches beautifully and then
+    // scores nothing is a wasted run.
+    const candidates = await fetchRedditCandidates({
+      subreddits: Array.isArray(sources) && sources.length ? sources : undefined,
+      since: sinceUnix,
+      deadline: startedAt + budgetMs * 0.4,
+    });
+    counts.scanned = candidates.length;
+    if (Date.now() - startedAt > budgetMs * 0.4) {
+      partial = true;
+      skipped.push("fetch phase hit its share of the run budget; sweep was cut short");
+    }
+
+    // 2. Triage before spending anything per-lead.
+    const relevant = await prefilterCandidates(candidates, getOpenAI());
+    counts.prefiltered = relevant.length;
+
+    // 3. Dedupe: against the CRM, and against this run.
+    const existing = await getExistingLeadKeys();
+    const seenThisRun = new Set();
+    const fresh = [];
+    for (const c of relevant) {
+      const keys = leadKeys({ name: c.author, redditUsername: c.author });
+      if (keys.some((k) => existing.has(k))) {
+        skipped.push(`${c.author}: already in CRM`);
+        continue;
+      }
+      if (keys.some((k) => seenThisRun.has(k))) {
+        skipped.push(`${c.author}: duplicate within this run`);
+        continue;
+      }
+      keys.forEach((k) => seenThisRun.add(k));
+      fresh.push(c);
+    }
+    counts.deduped = fresh.length;
+
+    // 4. Cap. `limit` is the manual override used for a small live test.
+    const cap = Math.min(
+      typeof limit === "number" && limit > 0 ? limit : CAPS.maxScoredPerRun,
+      CAPS.maxCandidatesPerRun,
+      CAPS.maxScoredPerRun
+    );
+    const toScore = fresh.slice(0, cap);
+    if (fresh.length > toScore.length) {
+      skipped.push(`${fresh.length - toScore.length} over the per-run cap of ${cap}`);
+    }
+
+    // 5. Score, and write each winner as it lands.
+    await mapLimit(toScore, CAPS.scoreConcurrency, async (post) => {
+      if (Date.now() - startedAt > budgetMs) {
+        partial = true;
+        skipped.push(`${post.author}: run budget exhausted`);
+        return;
+      }
+      try {
+        const result = await qualifyOne({
+          name: post.author,
+          leadSource: "reddit",
+          post,
+          source: `reddit r/${post.subreddit}`,
+          note: `${post.permalink} — ${post.title}`,
+        });
+        counts.scored++;
+
+        if (!WRITE_VERDICTS.includes(result.verdict)) {
+          skipped.push(`${post.author}: ${result.verdict}`);
+          return;
+        }
+
+        const row = {
+          username: post.author,
+          verdict: result.verdict,
+          contactType: result.contactType,
+          reasoning: result.reasoning,
+          permalink: post.permalink,
+          subreddit: post.subreddit,
+          title: post.title,
+          role: result.keyFacts?.role || "",
+        };
+
+        if (dryRun) {
+          written.push({ ...row, dryRun: true });
+          return;
+        }
+
+        // This CRM has no URL column, so the permalink and the dedupe key
+        // both live in Notes. getExistingLeadKeys reads them back out.
+        const notionPageId = await addLeadToCrm({
+          name: post.author,
+          // The title column is "Company Name" and a Reddit lead has no
+          // company. Use the source, which is short and groups in a view.
+          // The role sentence from keyFacts is prose, not a title: it belongs
+          // in the dossier, not in the column people scan.
+          company: `r/${post.subreddit} · Reddit`,
+          verdict: result.verdict,
+          dossier: result.dossier,
+          owner: SCOUT_OWNER,
+          note: `${redditKey(post.author)} | ${post.permalink} | ${post.title}`,
+          addedFrom: `the Reddit scout (r/${post.subreddit})`,
+        });
+        written.push({ ...row, notionPageId });
+        counts.written++;
+        console.log(`[scout] wrote ${post.author} (${result.verdict})`);
+      } catch (err) {
+        skipped.push(`${post.author}: error ${err?.message || err}`);
+      }
+    });
+
+    const durationMs = Date.now() - startedAt;
+    console.log(
+      `[scout] done in ${Math.round(durationMs / 1000)}s: scanned ${counts.scanned}, ` +
+        `prefiltered ${counts.prefiltered}, deduped ${counts.deduped}, ` +
+        `scored ${counts.scored}, written ${counts.written}${partial ? " (PARTIAL)" : ""}`
+    );
+
+    // `written` is the COUNT (per the response contract); the detail rows are
+    // writtenRows. Spreading counts and then a same-named array silently
+    // replaced the number with the array, which the workflow summary rendered
+    // as a wall of JSON where a digit belonged.
+    res.json({ ...counts, writtenRows: written, skipped, partial, dryRun, durationMs });
+  } catch (err) {
+    console.error("POST /api/scout failed:", err?.message || err);
+    res.status(500).json({
+      error: err?.message || "Scout failed",
+      ...counts,
+      writtenRows: written,
+      skipped,
+      partial: true,
+      durationMs: Date.now() - startedAt,
+    });
+  }
+});
+
+/* 8) POST /api/photo { linkedinUrl } -> { photoUrl }
    Best-effort recipient photo for the preview. Tries to read the page's
    og:image via Firecrawl. LinkedIn usually serves a login wall, so this often
    returns null — the UI falls back to an initials avatar. Never throws. */

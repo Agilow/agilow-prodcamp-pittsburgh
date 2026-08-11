@@ -27,4 +27,9 @@ services:
       # https://agilow-hub.vercel.app
       - key: CORS_ORIGIN
         sync: false
+      # Shared secret for POST /api/scout, called by the GitHub Actions cron.
+      # Must match the SCOUT_SECRET repo secret. Generate: openssl rand -hex 32
+      # Unset = the scout route returns 503 rather than being public.
+      - key: SCOUT_SECRET
+        sync: false
     # NOTE: do not set PORT — Render injects it and the server reads process.env.PORT.
