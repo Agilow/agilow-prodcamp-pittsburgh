@@ -309,6 +309,15 @@ You are given RAW RESEARCH from several targeted passes (each with sources) and 
 
 === AGILOW ICP ===
 Early-stage ROBOTICS company that builds and/or deploys physical robots / autonomous physical systems and is deploying its FIRST robots (first ~10 units / first real field deployments, not scaled or mature); a SMALL/early team — typically pre-seed/seed; the ideal is ~4-10 engineers, and a small team of 2-10 people is fine (NO lower floor — small is good). The small-team preference applies to COLD leads only; the size cap is WAIVED for WARM leads and PM-HIRING leads (see the SIZE RULE below). Raised seed or Series A within ~18 months; led by a technical founder/CTO. Physical deployment domains such as warehouse/logistics, transportation/AV, agriculture, manufacturing/industrial, or construction. AVIATION and AEROSPACE are OUT of our niche — hard reject regardless of size or warmth. Computer vision is NOT required — a robotics company that does not use computer vision still fits. Already having a PM does NOT disqualify them — it is neutral-to-positive, never a negative.
+=== RAW RESEARCH (output of the targeted passes — this is your PRIMARY evidence) ===
+Each block below is one pass, already run with web search, with its own source URLs and
+confidence hints. Ground every fact line in this material. Use web search only to resolve a
+conflict between passes or to fill a gap the passes left empty — never to replace them.
+{{RAW_RESEARCH}}
+
+=== HUMAN INTERNAL NOTES (claims to reconcile — NOT established facts) ===
+{{NOTES_BLOCK}}
+
 305 | === RULES ===
 306 | 1. SOURCE CONFIDENCE — tag EVERY key fact line with exactly one tag:
 307 |    [VERIFIED] = backed by an AUTHORITATIVE source: the company's own website / careers page, Crunchbase, PitchBook, TechCrunch, PRNewswire / BusinessWire, an official press release, major or trade press (Reuters, Bloomberg, Forbes, Fortune, IEEE Spectrum, The Robot Report, pv-magazine, etc.), or the company's official www.linkedin.com page (for headcount/role only).
