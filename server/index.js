@@ -17,6 +17,9 @@ import {
   RESEARCH_VERIFY,
   EXPLAIN_EDIT_PROMPT,
 } from "./prompts.js";
+// Scout: isolated behind these two modules plus the /api/scout route.
+import { fetchRedditCandidates, prefilterCandidates } from "./scout-sources.js";
+import { CAPS, WRITE_VERDICTS, SCOUT_OWNER } from "./scout-config.js";
 
 // Prefer IPv4. Some hosts (e.g. Render) have flaky IPv6 egress that surfaces as
 // intermittent "Premature close" / "fetch failed" when calling api.notion.com.
@@ -677,18 +680,24 @@ async function createResponseText(params, label) {
 }
 
 /* One targeted research pass: a web_search call driven by a system prompt. */
-async function runSearchPass(systemPrompt, label) {
+/* `web: false` drops the search tool. Used for pseudonymous leads, where the
+   only identifier is a handle: with the tool attached the model spends
+   minutes searching for "u/Easy-Marionberry-399", finds nothing (as it must),
+   and searches again. Measured at ~340s of a 400s run for a single lead. The
+   post is the evidence, so there is nothing out there to look for. */
+async function runSearchPass(systemPrompt, label, { web = true } = {}) {
   return createResponseText(
     {
       model: OPENAI_MODEL,
       temperature: 0.2,
-      tools: [{ type: "web_search" }],
+      ...(web ? { tools: [{ type: "web_search" }] } : {}),
       input: [
         { role: "system", content: systemPrompt },
         {
           role: "user",
-          content:
-            "Run this research pass now using web search. Return only the specified structured output, with a source URL on every fact line.",
+          content: web
+            ? "Run this research pass now using web search. Return only the specified structured output, with a source URL on every fact line."
+            : "Produce the dossier now from the material you were given. Do not claim any fact that is not in that material. Return only the specified structured output.",
         },
       ],
     },
@@ -901,7 +910,11 @@ async function researchDossier(inputs) {
     rawResearch,
   });
 
-  return runSearchPass(verifySystem, "openai.research.verify");
+  // No web search for a pseudonymous lead: there is no real identity to look
+  // up, and letting it try costs minutes per lead for guaranteed nothing.
+  return runSearchPass(verifySystem, "openai.research.verify", {
+    web: !isPseudonymous(inputs),
+  });
 }
 
 /* ============================================================
@@ -1614,7 +1627,163 @@ app.post("/api/parse-leads", async (req, res) => {
   }
 });
 
-/* 7) POST /api/photo { linkedinUrl } -> { photoUrl }
+/* ============================================================
+   7) POST /api/scout — the automated sweep.
+
+   Bearer-authed. Fetch Reddit, triage cheaply, drop anyone already in
+   the CRM, score what is left through the same qualifyOne the Qualify
+   screen uses, write the ones that clear the threshold.
+
+   Writes happen per lead as it qualifies, never batched at the end. The
+   caller is a GitHub Actions curl against a free Render instance that
+   can be killed mid-flight, and a killed run should cost us the unscored
+   tail, not everything it had already earned.
+   ============================================================ */
+app.post("/api/scout", async (req, res) => {
+  if (!requireScoutAuth(req, res)) return;
+
+  const startedAt = Date.now();
+  const { sources, since, limit, dryRun = false } = req.body || {};
+  const budgetMs = CAPS.budgetMs;
+  const skipped = [];
+  const written = [];
+  let partial = false;
+
+  const counts = { scanned: 0, prefiltered: 0, deduped: 0, scored: 0, written: 0 };
+
+  try {
+    // 1. Fetch. `sources` narrows the subreddit list for a cheap test run.
+    const sinceUnix =
+      typeof since === "number"
+        ? since
+        : Math.floor(Date.now() / 1000) - CAPS.sinceDays * 86400;
+    // Fetch gets at most 40% of the run budget. Reddit's rate-limit backoff
+    // is unbounded in principle, and a run that fetches beautifully and then
+    // scores nothing is a wasted run.
+    const candidates = await fetchRedditCandidates({
+      subreddits: Array.isArray(sources) && sources.length ? sources : undefined,
+      since: sinceUnix,
+      deadline: startedAt + budgetMs * 0.4,
+    });
+    counts.scanned = candidates.length;
+    if (Date.now() - startedAt > budgetMs * 0.4) {
+      partial = true;
+      skipped.push("fetch phase hit its share of the run budget; sweep was cut short");
+    }
+
+    // 2. Triage before spending anything per-lead.
+    const relevant = await prefilterCandidates(candidates, getOpenAI());
+    counts.prefiltered = relevant.length;
+
+    // 3. Dedupe: against the CRM, and against this run.
+    const existing = await getExistingLeadKeys();
+    const seenThisRun = new Set();
+    const fresh = [];
+    for (const c of relevant) {
+      const keys = leadKeys({ name: c.author, redditUsername: c.author });
+      if (keys.some((k) => existing.has(k))) {
+        skipped.push(`${c.author}: already in CRM`);
+        continue;
+      }
+      if (keys.some((k) => seenThisRun.has(k))) {
+        skipped.push(`${c.author}: duplicate within this run`);
+        continue;
+      }
+      keys.forEach((k) => seenThisRun.add(k));
+      fresh.push(c);
+    }
+    counts.deduped = fresh.length;
+
+    // 4. Cap. `limit` is the manual override used for a small live test.
+    const cap = Math.min(
+      typeof limit === "number" && limit > 0 ? limit : CAPS.maxScoredPerRun,
+      CAPS.maxCandidatesPerRun,
+      CAPS.maxScoredPerRun
+    );
+    const toScore = fresh.slice(0, cap);
+    if (fresh.length > toScore.length) {
+      skipped.push(`${fresh.length - toScore.length} over the per-run cap of ${cap}`);
+    }
+
+    // 5. Score, and write each winner as it lands.
+    await mapLimit(toScore, CAPS.scoreConcurrency, async (post) => {
+      if (Date.now() - startedAt > budgetMs) {
+        partial = true;
+        skipped.push(`${post.author}: run budget exhausted`);
+        return;
+      }
+      try {
+        const result = await qualifyOne({
+          name: post.author,
+          leadSource: "reddit",
+          post,
+          source: `reddit r/${post.subreddit}`,
+          note: `${post.permalink} — ${post.title}`,
+        });
+        counts.scored++;
+
+        if (!WRITE_VERDICTS.includes(result.verdict)) {
+          skipped.push(`${post.author}: ${result.verdict}`);
+          return;
+        }
+
+        const row = {
+          username: post.author,
+          verdict: result.verdict,
+          contactType: result.contactType,
+          reasoning: result.reasoning,
+          permalink: post.permalink,
+          subreddit: post.subreddit,
+          title: post.title,
+          role: result.keyFacts?.role || "",
+        };
+
+        if (dryRun) {
+          written.push({ ...row, dryRun: true });
+          return;
+        }
+
+        // This CRM has no URL column, so the permalink and the dedupe key
+        // both live in Notes. getExistingLeadKeys reads them back out.
+        const notionPageId = await addLeadToCrm({
+          name: post.author,
+          company: row.role ? `${row.role} (via r/${post.subreddit})` : `r/${post.subreddit}`,
+          verdict: result.verdict,
+          dossier: result.dossier,
+          owner: SCOUT_OWNER,
+          note: `${redditKey(post.author)} | ${post.permalink} | ${post.title}`,
+          addedFrom: `the Reddit scout (r/${post.subreddit})`,
+        });
+        written.push({ ...row, notionPageId });
+        counts.written++;
+        console.log(`[scout] wrote ${post.author} (${result.verdict})`);
+      } catch (err) {
+        skipped.push(`${post.author}: error ${err?.message || err}`);
+      }
+    });
+
+    const durationMs = Date.now() - startedAt;
+    console.log(
+      `[scout] done in ${Math.round(durationMs / 1000)}s: scanned ${counts.scanned}, ` +
+        `prefiltered ${counts.prefiltered}, deduped ${counts.deduped}, ` +
+        `scored ${counts.scored}, written ${counts.written}${partial ? " (PARTIAL)" : ""}`
+    );
+
+    res.json({ ...counts, written, skipped, partial, dryRun, durationMs });
+  } catch (err) {
+    console.error("POST /api/scout failed:", err?.message || err);
+    res.status(500).json({
+      error: err?.message || "Scout failed",
+      ...counts,
+      written,
+      skipped,
+      partial: true,
+      durationMs: Date.now() - startedAt,
+    });
+  }
+});
+
+/* 8) POST /api/photo { linkedinUrl } -> { photoUrl }
    Best-effort recipient photo for the preview. Tries to read the page's
    og:image via Firecrawl. LinkedIn usually serves a login wall, so this often
    returns null — the UI falls back to an initials avatar. Never throws. */

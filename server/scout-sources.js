@@ -32,17 +32,27 @@ import {
 const REDDIT_DELAY_MS = 3000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/* GET with Reddit's rate limiter in mind: serialized, retried on 429/5xx. */
-async function fetchRss(url, attempts = 4) {
+/* GET one feed, with Reddit's rate limiter in mind.
+
+   Breadth beats depth here. There are twenty feeds and we only need fifteen
+   candidates, so a 429 gets one short retry and then we move on. Fighting a
+   rate limiter for 90 seconds while nineteen other feeds go unread was
+   measured at 4/20 feeds in a run; failing fast reads far more of them. */
+async function fetchRss(url) {
   let lastErr;
-  for (let i = 1; i <= attempts; i++) {
+  for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       const res = await fetch(url, {
         headers: { "User-Agent": USER_AGENT, Accept: "application/atom+xml" },
-        signal: AbortSignal.timeout(25000),
+        signal: AbortSignal.timeout(20000),
       });
-      if (res.status === 429 || res.status >= 500) {
-        throw new Error(`HTTP ${res.status}`);
+      if (res.status === 429) {
+        // Rate limited. One brief pause, then abandon this feed.
+        if (attempt === 1) {
+          await sleep(5000);
+          throw new Error("HTTP 429 (retrying once)");
+        }
+        throw new Error("HTTP 429 (skipping feed)");
       }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const text = await res.text();
@@ -50,13 +60,12 @@ async function fetchRss(url, attempts = 4) {
       return text;
     } catch (err) {
       lastErr = err;
-      if (i === attempts) break;
-      // Reddit's limiter clears in tens of seconds, and QA saw 8/16/24s fall
-      // short. Losing a feed is survivable, so this backs off hard and gives up.
-      await sleep(i * 15000);
+      if (/429 \(skipping/.test(err.message)) break;
+      if (attempt === 3) break;
+      if (!/429/.test(err.message)) await sleep(attempt * 3000); // network/5xx
     }
   }
-  console.warn(`[scout] giving up on ${url}: ${lastErr?.message || lastErr}`);
+  console.warn(`[scout] skipped ${url.replace("https://www.reddit.com", "")}: ${lastErr?.message}`);
   return "";
 }
 
@@ -120,6 +129,10 @@ export async function fetchRedditCandidates({
   subreddits = SUBREDDITS,
   terms = SEARCH_TERMS,
   since = Math.floor(Date.now() / 1000) - CAPS.sinceDays * 86400,
+  // Wall-clock stop for the fetch phase. Rate-limit backoff can otherwise eat
+  // the whole run budget and leave nothing for the scoring the run exists to
+  // do. Fewer feeds is a smaller sweep; no scoring is a wasted one.
+  deadline = Infinity,
 } = {}) {
   const urls = [];
   for (const sub of subreddits) {
@@ -137,7 +150,12 @@ export async function fetchRedditCandidates({
   let fetched = 0;
 
   // Serial on purpose. Parallel requests are what trips Reddit's limiter.
+  let ranOut = false;
   for (const url of urls) {
+    if (Date.now() > deadline) {
+      ranOut = true;
+      break;
+    }
     const xml = await fetchRss(url);
     await sleep(REDDIT_DELAY_MS);
     if (!xml) continue;
@@ -155,7 +173,10 @@ export async function fetchRedditCandidates({
     }
   }
 
-  console.log(`[scout] reddit: ${out.length} posts from ${fetched}/${urls.length} feeds`);
+  console.log(
+    `[scout] reddit: ${out.length} posts from ${fetched}/${urls.length} feeds` +
+      (ranOut ? " (fetch deadline reached, stopped early)" : "")
+  );
   return out;
 }
 
