@@ -796,18 +796,33 @@ async function fetchCareersContent(company, companyUrl) {
 
    `person` and `recent` always run: identity must be verified independently of
    what the input claimed, and the hook is never in a CSV. */
+/* Lead sources whose "name" is a handle, not a person. Searching the web for
+   u/Easy-Marionberry-399 finds nothing, and finding nothing is not evidence
+   of a bad lead — it is what a pseudonym looks like. */
+const PSEUDONYMOUS_SOURCES = new Set(["reddit"]);
+const isPseudonymous = (i) => PSEUDONYMOUS_SOURCES.has(String(i?.leadSource || "").toLowerCase());
+
 const RESEARCH_PASSES = [
-  { key: "person", template: RESEARCH_PERSON, when: () => true },
-  { key: "role", template: RESEARCH_ROLE, when: (i) => !i.leadTitle },
-  { key: "company", template: RESEARCH_COMPANY, when: (i) => !!i.company && !i.companyBlurb },
-  { key: "team", template: RESEARCH_TEAM, when: (i) => !i.teamSize },
-  { key: "tooling", template: RESEARCH_TOOLING, when: () => true },
-  { key: "recent", template: RESEARCH_RECENT, when: () => true },
+  // Identity passes are pointless for a handle: the post is the evidence.
+  { key: "person", template: RESEARCH_PERSON, when: (i) => !isPseudonymous(i) },
+  { key: "role", template: RESEARCH_ROLE, when: (i) => !isPseudonymous(i) && !i.leadTitle },
+  {
+    key: "company",
+    template: RESEARCH_COMPANY,
+    when: (i) => !isPseudonymous(i) && !!i.company && !i.companyBlurb,
+  },
+  { key: "team", template: RESEARCH_TEAM, when: (i) => !isPseudonymous(i) && !i.teamSize },
+  { key: "tooling", template: RESEARCH_TOOLING, when: (i) => !isPseudonymous(i) },
+  { key: "recent", template: RESEARCH_RECENT, when: (i) => !isPseudonymous(i) },
 ];
 
 /* Everything the caller asserted about this lead, handed to the verify pass as
    claims. Tagged so rule 1 files them as [UNVERIFIED] rather than laundering
-   user input into evidence. */
+   user input into evidence.
+
+   For a pseudonymous lead this is the WHOLE evidence base, so the post goes in
+   verbatim: the gate reads "my team of 8" and "as a scrum master" straight out
+   of it. */
 function buildKnownFacts(inputs) {
   const supplied = [
     ["Role/title", inputs.leadTitle],
@@ -819,10 +834,28 @@ function buildKnownFacts(inputs) {
     ["Note supplied with the lead", inputs.note],
   ].filter(([, v]) => v && String(v).trim());
 
-  if (supplied.length === 0) return "(none supplied with this lead)";
-  return supplied
-    .map(([label, v]) => `${label}: ${String(v).trim()} [UNVERIFIED — from input]`)
-    .join("\n");
+  const lines = supplied.map(
+    ([label, v]) => `${label}: ${String(v).trim()} [UNVERIFIED — from input]`
+  );
+
+  if (isPseudonymous(inputs) && inputs.post) {
+    const p = inputs.post;
+    lines.push(
+      "",
+      "SOURCE POST (this is the primary evidence for a pseudonymous lead):",
+      `Platform: reddit, r/${p.subreddit || "?"} [SELF-STATED — from source post]`,
+      `Handle: u/${inputs.leadName || "?"} [SELF-STATED — from source post]`,
+      p.flair ? `Flair: ${p.flair} [SELF-STATED — from source post]` : "",
+      `Posted: ${p.createdUtc ? new Date(p.createdUtc * 1000).toISOString().slice(0, 10) : "unknown"}`,
+      `Permalink: ${p.permalink || "unknown"}`,
+      `Title: ${p.title || ""} [SELF-STATED — from source post]`,
+      "Body:",
+      `${p.selftext || "(no body text)"} [SELF-STATED — from source post]`
+    );
+  }
+
+  const body = lines.filter((l) => l !== "").join("\n");
+  return body || "(none supplied with this lead)";
 }
 
 /* Multi-step research: the applicable targeted, source-tiered passes gathered
@@ -835,7 +868,8 @@ async function researchDossier(inputs) {
   const passes = RESEARCH_PASSES.filter((p) => p.when(inputs));
   const skipped = RESEARCH_PASSES.filter((p) => !p.when(inputs)).map((p) => p.key);
   if (skipped.length) {
-    console.log(`[research] ${inputs.leadName || "?"}: skipped ${skipped.join(", ")} (already known)`);
+    const why = isPseudonymous(inputs) ? "pseudonymous lead" : "already known";
+    console.log(`[research] ${inputs.leadName || "?"}: skipped ${skipped.join(", ")} (${why})`);
   }
 
   // Passes are independent -> run concurrently for depth without serial latency.
@@ -847,9 +881,17 @@ async function researchDossier(inputs) {
   );
   const gathered = Object.fromEntries(results);
 
-  const rawResearch = passes
-    .map(({ key }) => `### ${key.toUpperCase()} PASS\n${gathered[key] || "(no output)"}`)
-    .join("\n\n");
+  // Every web pass is keyed on a real identity, so a pseudonymous lead runs
+  // none of them. Say that explicitly rather than handing the verify pass an
+  // empty section it might read as "research came back empty" (which would
+  // look like a dead lead rather than a lead with a different evidence base).
+  const rawResearch = passes.length
+    ? passes
+        .map(({ key }) => `### ${key.toUpperCase()} PASS\n${gathered[key] || "(no output)"}`)
+        .join("\n\n")
+    : "(No web research passes were run. This is a PSEUDONYMOUS lead: the handle is not " +
+      "a real name, so identity lookups would return nothing and that absence would mean " +
+      "nothing. The SOURCE POST under KNOWN FACTS is the evidence base for this lead.)";
 
   // warmTie already = "Latest state | Notes: ..." (the human's claims).
   const verifySystem = fillPrompt(RESEARCH_VERIFY, {
@@ -965,6 +1007,11 @@ async function qualifyOne(lead = {}) {
     companyUrl: lead.companyUrl || "",
     source: lead.source || "",
     note: lead.note || "",
+    // "reddit" switches the engine into pseudonymous mode: no web passes, the
+    // source post becomes the evidence base, and the identity tripwire stands
+    // down. Absent or "linkedin"/"csv"/"" means the normal real-name path.
+    leadSource: lead.leadSource || "",
+    post: lead.post || null,
     // A pasted lead has no CRM row, but a caller (scout feed, CSV import,
     // an operator pasting context) may still supply a relationship note.
     warmTie: lead.warmTie || lead.note || "",
@@ -976,6 +1023,7 @@ async function qualifyOne(lead = {}) {
     company: lead.company || "",
     role: lead.role || "",
     linkedinUrl: lead.linkedinUrl || "",
+    leadSource: inputs.leadSource,
     verdict: structured.verdict,
     contactType: structured.contactType || "Unknown",
     suggestedIntent: structured.suggestedIntent || "",
