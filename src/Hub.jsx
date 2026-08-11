@@ -584,10 +584,12 @@ function parseDossierField(text, label) {
   return m ? m[1].trim() : "";
 }
 
-/* CSS pill class for a CONTACT TYPE value. */
+/* CSS pill class for a CONTACT TYPE value. Mirrors the enum in
+   extractVerdict (server/index.js) and the taxonomy in RESEARCH_VERIFY:
+   Ceremony owner | Eng leader | Connector | IC | Not relevant | Unknown. */
 function contactTypeClass(type) {
   const t = (type || "").toLowerCase();
-  if (t.includes("founder") || t.includes("exec")) return "high";
+  if (t.includes("ceremony") || t.includes("eng leader")) return "high";
   if (t.includes("connector")) return "med";
   return "low";
 }
@@ -1191,12 +1193,13 @@ function verdictRank(verdict) {
   return 2;
 }
 
+/* Mirrors the keyFacts schema in extractVerdict (server/index.js). */
 const KEY_FACT_LABELS = {
+  role: "Role",
   company: "Company",
-  funding: "Funding",
-  headcount: "Headcount",
-  stage: "Stage",
-  hiring: "Hiring",
+  teamSize: "Team size",
+  tooling: "Tooling",
+  painSignal: "Pain signal",
   recentActivity: "Recent activity",
 };
 
@@ -1386,7 +1389,7 @@ function Qualify({ onOpenDraft, onRefreshLeads, onDraftAll, input, setInput, row
       <div className="hub-page-wrap qualify-page">
         <div className="page-header tight">
           <div>
-            <p className="eyebrow">ICP qualification</p>
+            <p className="eyebrow">Lead qualification</p>
             <h1>Qualify</h1>
           </div>
           {rows.length > 0 && (
@@ -1419,12 +1422,12 @@ function Qualify({ onOpenDraft, onRefreshLeads, onDraftAll, input, setInput, row
           <div className="panel-title">
             <div>
               <h2>Paste leads</h2>
-              <p>Anything goes — names, companies, or LinkedIn / website URLs. AI sorts it out.</p>
+              <p>Names, titles, LinkedIn URLs, or a pasted connections list. AI sorts it out.</p>
             </div>
           </div>
           <textarea
             className="qualify-textarea"
-            placeholder={"Banks Hunter, Charge Robotics\nhttps://www.linkedin.com/in/jeffrey-martin\nEyal Cohen — Humble Robotics — humble.inc"}
+            placeholder={"Priya Sharma, Scrum Master, Zeta Systems\nMarcus Delgado — Engineering Manager — Fernwood Labs\nhttps://www.linkedin.com/in/jordan-avery"}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             disabled={running}
@@ -1552,7 +1555,7 @@ function Qualify({ onOpenDraft, onRefreshLeads, onDraftAll, input, setInput, row
                             transition: "transform 120ms var(--ease)",
                           }}
                         />
-                        ICP checks &amp; research
+                        Fit checks &amp; research
                         {(row.result.checks || []).length > 0 && (
                           <span className="research-count">{row.result.checks.length}</span>
                         )}

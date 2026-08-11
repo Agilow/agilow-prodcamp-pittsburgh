@@ -730,7 +730,7 @@ async function extractVerdict(dossier) {
           {
             role: "system",
             content:
-              "Extract structured fields from this Agilow ICP research dossier. Use ONLY what the dossier states — do not add, infer, or change any fact. Copy the ICP FIT verdict, CONTACT TYPE, SUGGESTED INTENT, and the A-E checks exactly as written.",
+              "Extract structured fields from this Agilow person-fit research dossier. Use ONLY what the dossier states — do not add, infer, or change any fact. Copy the ICP FIT verdict, CONTACT TYPE, SUGGESTED INTENT, and the A-E checks exactly as written.",
           },
           { role: "user", content: `DOSSIER:\n${dossier}\n\nReturn the structured JSON.` },
         ],
@@ -747,13 +747,15 @@ async function extractVerdict(dossier) {
                   type: "string",
                   enum: ["Strong", "Moderate", "Moderate (unverified)", "Weak"],
                 },
+                // Must stay in lockstep with the CONTACT TYPE list in
+                // RESEARCH_VERIFY and with contactTypeClass() in src/Hub.jsx.
                 contactType: {
                   type: "string",
                   enum: [
-                    "ICP founder/exec",
+                    "Ceremony owner",
+                    "Eng leader",
                     "Connector",
-                    "Engineer/IC",
-                    "Adjacent",
+                    "IC",
                     "Not relevant",
                     "Unknown",
                   ],
@@ -773,18 +775,21 @@ async function extractVerdict(dossier) {
                     required: ["criterion", "value", "evidence"],
                   },
                 },
+                // Mirrored by KEY_FACT_LABELS in src/Hub.jsx. Every field is
+                // `required` under strict mode, so the model emits "" when a
+                // fact is absent rather than omitting the key.
                 keyFacts: {
                   type: "object",
                   additionalProperties: false,
                   properties: {
+                    role: { type: "string" },
                     company: { type: "string" },
-                    funding: { type: "string" },
-                    headcount: { type: "string" },
-                    stage: { type: "string" },
-                    hiring: { type: "string" },
+                    teamSize: { type: "string" },
+                    tooling: { type: "string" },
+                    painSignal: { type: "string" },
                     recentActivity: { type: "string" },
                   },
-                  required: ["company", "funding", "headcount", "stage", "hiring", "recentActivity"],
+                  required: ["role", "company", "teamSize", "tooling", "painSignal", "recentActivity"],
                 },
               },
               required: ["verdict", "contactType", "suggestedIntent", "reasoning", "checks", "keyFacts"],
