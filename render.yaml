@@ -3,7 +3,7 @@
 # Secrets (sync:false) must be filled in the Render dashboard after creation.
 services:
   - type: web
-    name: agilow-hub-api
+    name: agilow-prodcamp-pittsburgh
     runtime: node
     rootDir: server
     plan: free

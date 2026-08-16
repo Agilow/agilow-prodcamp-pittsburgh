@@ -6,7 +6,7 @@ name: scout
 #
 # Needs two repo secrets:
 #   SCOUT_URL     the Render backend origin, no trailing slash
-#                 e.g. https://agilow-hub-api.onrender.com
+#                 e.g. https://agilow-prodcamp-pittsburgh.onrender.com
 #   SCOUT_SECRET  must match the SCOUT_SECRET env var on Render
 #
 # Without them the job fails on the guard step rather than posting nowhere.

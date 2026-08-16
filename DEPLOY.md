@@ -15,7 +15,7 @@ The repo includes `render.yaml` (a Blueprint). Two ways:
 **A. Blueprint (recommended)**
 1. Push this repo to GitHub.
 2. Render dashboard -> **New -> Blueprint** -> select the repo. It reads `render.yaml`
-   and creates a web service `agilow-hub-api` with `rootDir: server`.
+   and creates a web service `agilow-prodcamp-pittsburgh` with `rootDir: server`.
 3. Fill the secret env vars (they're `sync:false`, so Render prompts for them):
    - `OPENAI_API_KEY`
    - `NOTION_API_KEY`
@@ -29,7 +29,7 @@ The repo includes `render.yaml` (a Blueprint). Two ways:
   **Build Command** = `npm install`, **Start Command** = `node index.js`.
 - Add the same env vars. Do **not** set `PORT` (Render injects it; the server reads `process.env.PORT`).
 
-Copy the service URL, e.g. `https://agilow-hub-api.onrender.com`.
+Copy the service URL, e.g. `https://agilow-prodcamp-pittsburgh.onrender.com`.
 
 > Free tier note: the service sleeps after inactivity, so the first request after
 > idle (and the first `/api/leads` load) can take ~50s to cold-start.
@@ -44,7 +44,7 @@ Copy the service URL, e.g. `https://agilow-hub-api.onrender.com`.
    Root directory = repo root (leave default). Framework auto-detects as Vite.
 2. **Environment Variables** -> add:
    - `VITE_API_URL` = your Render origin from step 1 (no trailing slash),
-     e.g. `https://agilow-hub-api.onrender.com`
+     e.g. `https://agilow-prodcamp-pittsburgh.onrender.com`
 3. Deploy. Vercel inlines `VITE_API_URL` at build time, so the app calls the Render
    backend directly (no proxy in production).
 
