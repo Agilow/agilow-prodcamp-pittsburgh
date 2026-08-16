@@ -1,0 +1,40 @@
+name: keepalive
+
+# Pings the backend so Render's free plan does not spin it down. A cold start
+# costs ~30-60s on the first request, which the Vercel frontend eats as a hang.
+#
+# Reuses the SCOUT_URL repo secret set for the scout workflow. Nothing else.
+#
+# ponytail: GitHub's scheduler delays scheduled workflows under load, so a tick
+# can land late enough for the 15-minute idle timeout to fire anyway. If you see
+# cold starts in the Render logs, move to an external pinger (cron-job.org,
+# UptimeRobot) that actually honors its interval.
+
+on:
+  schedule:
+    # Every 10 minutes. Render spins down after 15 minutes of no requests.
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+# A delayed tick must not pile up behind the previous one.
+concurrency:
+  group: keepalive
+  cancel-in-progress: true
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ping
+        env:
+          SCOUT_URL: ${{ secrets.SCOUT_URL }}
+        run: |
+          if [ -z "$SCOUT_URL" ]; then
+            echo "SCOUT_URL is not set as a repo secret."
+            exit 1
+          fi
+          # -m 90 covers a cold start: if the instance did fall asleep, this
+          # request is the one that wakes it and it must not time out first.
+          curl -sS -m 90 -w "\nHTTP %{http_code} in %{time_total}s\n" \
+            "$SCOUT_URL/api/ping"
